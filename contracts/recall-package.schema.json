@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://htc.local/contracts/recall-package.schema.json",
+  "title": "HTC Recall Package",
+  "type": "object",
+  "required": ["package_id", "purpose", "issued_at", "expires_at", "package_version", "revocation_epoch", "items", "adapter_payload"],
+  "properties": {
+    "package_id": {"type": "string", "minLength": 1},
+    "purpose": {"type": "string", "minLength": 1},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "package_version": {"type": "integer", "minimum": 0},
+    "revocation_epoch": {"type": "integer", "minimum": 0},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["memory_id", "category", "source_ids", "reason_codes"],
+        "properties": {
+          "memory_id": {"type": "string"},
+          "category": {"enum": ["allowed_to_use", "internal_only", "confirm_first", "suppressed"]},
+          "summary": {"type": ["string", "null"]},
+          "guidance": {"type": ["string", "null"]},
+          "source_ids": {"type": "array", "items": {"type": "string"}},
+          "reason_codes": {"type": "array", "items": {"type": "string"}}
+        },
+        "additionalProperties": false
+      }
+    },
+    "adapter_payload": {
+      "type": "object",
+      "required": ["allowed_memories", "response_guidance", "confirmation_prompts", "response_constraints"],
+      "properties": {
+        "allowed_memories": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["memory_id", "summary"],
+            "properties": {
+              "memory_id": {"type": "string"},
+              "summary": {"type": "string"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "response_guidance": {"type": "array", "items": {"type": "string"}},
+        "confirmation_prompts": {"type": "array", "items": {"type": "string"}},
+        "response_constraints": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

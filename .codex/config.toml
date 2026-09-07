@@ -1,0 +1,4 @@
+[mcp_servers.htc]
+command = "uv"
+args = ["run", "--no-sync", "--project", "core", "python", "-m", "htc_core.mcp_server"]
+startup_timeout_sec = 10

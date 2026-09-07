@@ -1,0 +1,53 @@
+node_modules/
+dist/
+.vite/
+tsconfig.tsbuildinfo
+
+# impeccable-ignore-start
+# Ephemeral output, runtime state, and per-developer overrides.
+.impeccable/config.local.json
+.impeccable/hook.cache.json
+.impeccable/hook.pending.json
+.impeccable/*.png
+.impeccable/live/server.json
+.impeccable/live/sessions/
+.impeccable/live/previews/
+.impeccable/live/annotations/
+.impeccable/live/cache/
+.impeccable/live/manual-edit-apply-transaction.json
+.impeccable/live/manual-edit-events.jsonl
+.impeccable/live/manual-edit-evidence/
+.impeccable/live/pending-manual-edits.json
+.impeccable/live/deferred-svelte-component-accepts.json
+.impeccable/live/*.png
+# impeccable-ignore-end
+.gstack/
+
+# Python Silent Core local state.
+core/.venv/
+core/.pytest_cache/
+core/.ruff_cache/
+core/.tmp-test/
+core/pytest-tmp*/
+core/**/__pycache__/
+core/**/*.py[cod]
+core/*.sqlite
+core/*.sqlite3
+core/*.db
+
+# HTC local runtime state. The default database lives in ~/.htc; this also
+# protects project-local overrides used while testing adapters.
+.htc/
+*.htc.sqlite3
+
+# Local visual experiments that are intentionally not part of the product.
+src/assets/memory-road-adventure.jpg
+src/assets/memory-road-hero.png
+src/assets/memory-road-landscape.jpg
+core/.tmp-review-run/
+core/.tmp-fr*/
+
+# Local design exploration and private HTC runtime data
+.impeccable/
+
+.tmp-public-pytest/

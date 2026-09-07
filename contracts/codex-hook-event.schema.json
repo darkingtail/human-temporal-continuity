@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://htc.local/contracts/codex-hook-event.schema.json",
+  "title": "HTC Codex Hook Event",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["session_id", "turn_id", "hook_event_name", "prompt"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "turn_id": {"type": "string", "minLength": 1},
+        "hook_event_name": {"const": "UserPromptSubmit"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 10000},
+        "cwd": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    {
+      "type": "object",
+      "required": ["session_id", "turn_id", "hook_event_name"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1},
+        "turn_id": {"type": "string", "minLength": 1},
+        "hook_event_name": {"const": "Stop"},
+        "last_assistant_message": {"type": ["string", "null"]},
+        "cwd": {"type": "string"}
+      },
+      "additionalProperties": true
+    }
+  ]
+}
