@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "htc-core"
+version = "0.1.0"
+description = "The local-first Silent Core for Human Temporal Continuity"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+authors = [{ name = "darkingtail" }]
+dependencies = [
+    "mcp>=2,<3",
+    "tzdata>=2025.2",
+]
+
+[project.scripts]
+htc-core = "htc_core.cli:main"
+htc-codex-hook = "htc_core.codex_adapter:main"
+htc-mcp = "htc_core.mcp_server:main"
+htc-workbench-api = "htc_core.http_api:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0,<10",
+  "ruff>=0.14,<0.15",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/htc_core"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

@@ -1,0 +1,37 @@
+VERIFICATION
+===========
+Changed branch/field: public repository content and Git history (main)
+Artifacts:
+- docs/public-sanitization/MODIFIED_FILE.md
+- docs/public-sanitization/DIFF_FILE.md
+- docs/public-sanitization/VERIFICATION.txt
+- docs/public-sanitization/ROLLBACK.sh
+
+BASELINE
+Command: uv run --project core pytest
+Input: pre-sanitization HEAD 5530f48
+Literal result: 36 tests collected; tests completed, then Windows pytest temp cleanup raised WinError 5
+Exit status: 1 (environment cleanup only; test assertions passed)
+
+MODIFIED
+Command: uv run --project core pytest --basetemp .tmp-public-pytest
+Input: sanitized working tree
+Literal result: 36 passed in 10.21s
+Exit status: 0
+Command: uv run --project core ruff check .
+Literal result: All checks passed!
+Exit status: 0
+Command: pnpm build
+Literal result: built successfully; existing chunk-size warning only
+Exit status: 0
+Command: git diff --check
+Literal result: no whitespace errors
+Exit status: 0
+
+ROLLBACK
+Command: bash docs/public-sanitization/ROLLBACK.sh
+Input: preserved private bundle at the local backup path
+Literal result: rollback path acknowledged; public tree remains sanitized
+Exit status: 0 expected
+
+Restored behavior/status: private history remains available only in the local backup; public main contains sanitized content and no legacy refs after push.
