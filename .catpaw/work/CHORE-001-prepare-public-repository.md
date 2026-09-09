@@ -29,4 +29,13 @@ machine-specific identifiers, private task references, or prior commit history.
 
 - Plan: [CHORE-001 Plan](../plans/CHORE-001-prepare-public-repository.md)
 
-## Completion`n`nThe original repository was deleted and recreated as a public repository. The remote now contains only the sanitized `main` root commit.
+## Completion
+
+The original repository was deleted and recreated as a public repository. The
+remote now contains only the sanitized `main` root commit.
+
+## Follow-up
+
+Global user-level runtime design is documented in
+`docs/global-memory-architecture.md`. The next implementation milestone is a
+Source Registry plus an explicit JSONL historical importer.

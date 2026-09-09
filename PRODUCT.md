@@ -28,6 +28,9 @@ HTC 是来源无关的人类式记忆核心，不是新的聊天产品、聊天�
 
 首个产品形态是 **HTC Local Memory Hub**：运行在个人电脑上的本地记忆中枢，包含本地核心、持久化存储、可视化 Memory Workbench，以及连接不同 AI 工具的 Adapter / Importer。
 
+Local Memory Hub 是用户级运行时，不是项目级插件。项目里的配置只负责把
+当前来源连接到用户级 HTC；所有来源最终进入同一份用户记忆库。
+
 典型流程：
 
 1. Codex、Claude、ChatGPT、其他聊天工具或手动记录产生 observation。
@@ -42,12 +45,16 @@ Workbench 是 HTC 的治理界面，不等于 HTC 本身。“蜿蜒的路”应
 ## Capabilities and Constraints
 
 - 首版为单用户、本地优先，不要求登录、云同步或团队协作。
+- HTC 运行时默认位于用户级目录（例如 `~/.htc/`），项目不得拥有 canonical
+  memory database。
 - 当前 Vite + React + TypeScript 工程是产品形态原型，不代表 HTC 是纯前端应用。
 - 首版实现应包含本地核心服务和 SQLite 或等价本地存储；具体后端结构尚待工程设计。
 - 首个接入渠道可以是 Codex Adapter，但核心不得依赖 Codex。
 - 外部工具只能通过显式 Adapter、Importer 或用户操作提交 observation。
 - 不读取 Codex、ChatGPT、Claude 等产品的私有 SQLite、IndexedDB 或内部缓存。
 - 不在后台偷偷扫描或全量导入用户历史会话。
+- “检索所有对话”只检索已注册来源提交到 HTC 的标准化 Observation；历史内容
+  必须通过用户选择的导出文件或显式 Importer 进入。
 - Conversation 是来源容器；Memory 归属于 User，而不是某条会话。
 - 新候选默认进入 Inbox；敏感内容必须最小化，并默认禁止主动表达。
 - Recall Package 必须用途绑定、短期有效，不能跨话题无限复用。
