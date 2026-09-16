@@ -61,9 +61,11 @@ npm run dev
 
 `Silent Core MVP / Bootstrap Recovery / Codex Adapter MVP / Local Workbench MVP`
 
-Silent Core 已实现 `observe -> candidate -> decide -> memory -> recall -> explain`，并通过项目级 Codex Hook 在回答前注入安全召回上下文、通过 MCP 提供显式召回。Workbench 已通过 loopback API 读取同一份真实 Core 数据，可审核 Candidate、查看来源与治理解释、纠正或撤回 Memory、关闭主动提及并设置用户级跨会话权限。
+Silent Core 已实现 `observe -> candidate -> decide -> memory -> recall -> explain`，并通过项目级 Codex Hook 在回答前注入安全召回上下文、通过 MCP 提供显式召回。Workbench 已通过 loopback API 读取同一份真实 Core 数据，可审核 Candidate、查看来源与治理解释、纠正或撤回 Memory、关闭主动提及并设置用户级跨会话权限。2026 年 9 月 16 日起，新用户默认开启已确认 Memory 的跨会话内部召回，但默认不主动表达；用户关闭总开关或单条权限后立即失效。
 
 Workbench 的 Recall Preview 还能输入一句模拟消息，分别展示允许用于回答、只作内部引导、需要先确认的记忆，以及 Adapter 最终实际获得的安全投影。
+
+当前状态是独立、可编辑、会老化的短期记录，只保存用户可见的粗粒度标签、语气和起始时间。它不会静默升级为长期 Memory，也不能成为向模型注入隐藏情绪原文的旁路。
 
 Workbench 还提供来源会话审计：列出 HTC 自己已知的 Observation / Adapter Event
 会话，并展示它们贡献的 Candidate、Memory 和最小化来源片段。它不会读取 Codex

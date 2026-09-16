@@ -161,6 +161,49 @@ input:focus-visible {
   background: #b7bbb7;
 }
 
+.current-state-editor {
+  display: grid;
+  gap: 12px;
+  margin: 24px 0;
+  padding-top: 20px;
+  border-top: 1px solid rgba(35, 47, 55, 0.12);
+}
+
+.current-state-editor > div {
+  display: grid;
+  gap: 4px;
+}
+
+.current-state-editor h3,
+.current-state-editor p {
+  margin: 0;
+}
+
+.current-state-editor p,
+.current-state-editor small {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.current-state-editor label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.current-state-editor input,
+.current-state-editor select {
+  min-height: 40px;
+  border: 1px solid rgba(35, 47, 55, 0.18);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font: inherit;
+}
+
 .settings-facts p,
 .memory-explanation p {
   display: flex;

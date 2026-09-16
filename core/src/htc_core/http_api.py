@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .codex_adapter import now_iso
 from .core import SilentCore
@@ -48,9 +50,14 @@ def memory_dto(memory: Any, sources: list[dict[str, Any]] | None = None) -> dict
         "sensitivity": memory.sensitivity,
         "intention_state": memory.intention_state,
         "outcome": memory.outcome,
+        "closed_at": memory.closed_at,
         "persist_consent": memory.persist_consent,
         "cross_session_consent": memory.cross_session_consent,
         "proactive_consent": memory.proactive_consent,
+        "recall_allowed": memory.recall_allowed,
+        "surface_mode": memory.surface_mode,
+        "max_per_conversation": memory.max_per_conversation,
+        "min_gap_turns": memory.min_gap_turns,
         "revision": memory.revision,
         "source_ids": list(memory.source_ids),
         "sources": _json(sources or []),
@@ -76,6 +83,18 @@ def candidate_dto(candidate: Any) -> dict[str, Any]:
 def _now(settings: RuntimeSettings, body: dict[str, Any] | None = None) -> str:
     supplied = body.get("now") if body else None
     return supplied if isinstance(supplied, str) and supplied else now_iso(settings.timezone)
+
+
+def _datetime_in_user_timezone(value: str, timezone: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo(timezone))
+        else:
+            parsed = parsed.astimezone(ZoneInfo(timezone))
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ApiError(400, "invalid_state_since") from exc
+    return parsed.isoformat(timespec="seconds")
 
 
 class WorkbenchService:
@@ -104,6 +123,9 @@ class WorkbenchService:
         return candidate
 
     def status(self) -> dict[str, Any]:
+        current_state = self.core.current_state(
+            self.user_id, now=now_iso(self.settings.timezone)
+        )
         return {
             "user_id": self.user_id,
             "timezone": self.settings.timezone,
@@ -114,7 +136,11 @@ class WorkbenchService:
             "pending_candidates": len(
                 self.core.repo.candidates(self.user_id, status="pending", limit=200)
             ),
+            "current_state": current_state,
         }
+
+    def current_state(self) -> dict[str, Any] | None:
+        return self.core.current_state(self.user_id, now=now_iso(self.settings.timezone))
 
     def memories(self) -> list[dict[str, Any]]:
         memories = self.core.repo.memories(self.user_id)
@@ -254,8 +280,22 @@ class WorkbenchService:
 
     def permissions(self, memory_id: str, body: dict[str, Any]) -> dict[str, Any]:
         memory = self._memory(memory_id)
-        for key in ("proactive_expression", "cross_session_internal_use"):
+        for key in ("proactive_expression", "cross_session_internal_use", "recall_allowed"):
             if key in body and not isinstance(body[key], bool):
+                raise ApiError(400, f"invalid_{key}")
+        if "surface_mode" in body and body["surface_mode"] not in {
+            "silent",
+            "on_user_topic",
+            "gentle_prompt",
+        }:
+            raise ApiError(400, "invalid_surface_mode")
+        for key in ("max_per_conversation", "min_gap_turns"):
+            if key in body and (
+                isinstance(body[key], bool)
+                or not isinstance(body[key], int)
+                or body[key] < 0
+                or body[key] > 100
+            ):
                 raise ApiError(400, f"invalid_{key}")
         try:
             return self.core.set_permissions(
@@ -264,6 +304,67 @@ class WorkbenchService:
                 expected_revision=int(body.get("expected_revision", memory.revision)),
                 proactive_expression=body.get("proactive_expression"),
                 cross_session_internal_use=body.get("cross_session_internal_use"),
+                recall_allowed=body.get("recall_allowed"),
+                surface_mode=body.get("surface_mode"),
+                max_per_conversation=body.get("max_per_conversation"),
+                min_gap_turns=body.get("min_gap_turns"),
+            )
+        except ValueError as exc:
+            code = str(exc)
+            raise ApiError(409 if code == "revision_conflict" else 400, code) from exc
+
+    def intention(self, memory_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        memory = self._memory(memory_id)
+        expected_revision = body.get("expected_revision", memory.revision)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise ApiError(400, "invalid_expected_revision")
+        if not isinstance(body.get("intention_state"), str):
+            raise ApiError(400, "invalid_intention_state")
+        if "outcome" in body and not isinstance(body["outcome"], str):
+            raise ApiError(400, "invalid_intention_outcome")
+        try:
+            return self.core.update_intention(
+                memory_id,
+                _now(self.settings, body),
+                expected_revision=expected_revision,
+                intention_state=body["intention_state"],
+                outcome=body.get("outcome"),
+            )
+        except ValueError as exc:
+            code = str(exc)
+            raise ApiError(409 if code in {"revision_conflict", "intention_state_terminal"} else 400, code) from exc
+
+    def set_current_state(self, body: dict[str, Any]) -> dict[str, Any]:
+        label = body.get("label")
+        tone = body.get("tone")
+        since = body.get("since")
+        source_memory_ids = body.get("source_memory_ids", [])
+        expected_revision = body.get("expected_revision")
+        if not isinstance(label, str) or not label.strip() or len(label) > 120:
+            raise ApiError(400, "invalid_state_label")
+        if tone not in {"steady", "strained", "low", "hopeful", "uncertain", "energized"}:
+            raise ApiError(400, "invalid_state_tone")
+        if not isinstance(since, str) or not since:
+            raise ApiError(400, "invalid_state_since")
+        if not isinstance(source_memory_ids, list) or any(
+            not isinstance(value, str) or len(value) > 200 for value in source_memory_ids
+        ):
+            raise ApiError(400, "invalid_source_memory_ids")
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+        ):
+            raise ApiError(400, "invalid_expected_revision")
+        for memory_id in source_memory_ids:
+            self._memory(memory_id)
+        try:
+            return self.core.set_current_state(
+                self.user_id,
+                label=label,
+                tone=tone,
+                since=_datetime_in_user_timezone(since, self.settings.timezone),
+                source_memory_ids=tuple(source_memory_ids),
+                now=_now(self.settings, body),
+                expected_revision=expected_revision,
             )
         except ValueError as exc:
             code = str(exc)
@@ -285,6 +386,7 @@ class WorkbenchService:
         conversation_id = body.get("conversation_id", "workbench-preview")
         purpose = body.get("purpose", "reply")
         ttl_minutes = body.get("ttl_minutes", 10)
+        turn_index = body.get("turn_index")
         if not isinstance(query, str) or not query.strip() or len(query) > 4_000:
             raise ApiError(400, "invalid_query")
         if (
@@ -299,6 +401,12 @@ class WorkbenchService:
             raise ApiError(400, "invalid_ttl_minutes")
         if not 1 <= ttl_minutes <= 60:
             raise ApiError(400, "invalid_ttl_minutes")
+        if turn_index is not None and (
+            isinstance(turn_index, bool)
+            or not isinstance(turn_index, int)
+            or turn_index < 0
+        ):
+            raise ApiError(400, "invalid_turn_index")
         result = self.core.recall(
             {
                 "user_id": self.user_id,
@@ -309,6 +417,7 @@ class WorkbenchService:
                 # must not be able to forge whether an intention has elapsed.
                 "now": now_iso(self.settings.timezone),
                 "ttl_minutes": ttl_minutes,
+                **({"turn_index": turn_index} if turn_index is not None else {}),
             }
         )
         for item in result["items"]:
@@ -378,6 +487,8 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         if path == ["api", "status"]:
             return self.service.status()
+        if path == ["api", "state"]:
+            return {"state": self.service.current_state()}
         if path == ["api", "memories"]:
             return {"memories": self.service.memories()}
         if path == ["api", "candidates"]:
@@ -408,12 +519,18 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             return self.service.revise(path[2], body)
         if len(path) == 4 and path[:2] == ["api", "memories"] and path[3] == "permissions":
             return self.service.permissions(path[2], body)
+        if len(path) == 4 and path[:2] == ["api", "memories"] and path[3] == "surface-policy":
+            return self.service.permissions(path[2], body)
+        if len(path) == 4 and path[:2] == ["api", "memories"] and path[3] == "intention":
+            return self.service.intention(path[2], body)
         if len(path) == 4 and path[:2] == ["api", "memories"] and path[3] == "suppress":
             return self.service.permissions(path[2], {**body, "proactive_expression": False})
         if len(path) == 4 and path[:2] == ["api", "memories"] and path[3] == "delete":
             return self.service.revise(path[2], {**body, "action": "retract"})
         if path == ["api", "policy"]:
             return self.service.policy(body)
+        if path == ["api", "state"]:
+            return self.service.set_current_state(body)
         if path == ["api", "recall-preview"]:
             return self.service.recall_preview(body)
         raise ApiError(404, "route_not_found")

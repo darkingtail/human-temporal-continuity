@@ -40,12 +40,12 @@ ImportSource → ImportJob → Observation → Candidate → 用户决定 → Me
 |---|---|---|
 | 选择导入来源 | 允许读取这一个用户选择的来源 | 不存在，必须显式选择 |
 | 保留候选 | 用户确认它可成为本地记忆 | 需要在 Inbox 确认 |
-| 跨会话内部使用 | 已确认记忆可用于未来其他会话的理解 | 关闭 |
-| 主动提及 | AI 可以主动说出这段记忆 | 独立控制；负面/敏感内容默认收紧 |
+| 跨会话内部使用 | 已确认记忆可用于未来其他会话的理解 | 新用户开启，可随时关闭 |
+| 主动提及 | AI 可以主动说出这段记忆 | 默认关闭；负面/敏感内容进一步收紧 |
 
 其中，“候选点保留”形成 Memory；跨会话能力由用户级开关控制。关闭或撤回该开关会递增撤销版本，使之前发出的 Recall Package 失效。
 
-导入记录提供的 `permissions` 只是提取器输出，不能越过用户级授权。
+导入记录提供的 `permissions` 只是提取器输出，不能越过用户级授权。若 Candidate 带有权限限制，接受请求必须显式确认这些限制；缺少确认或试图把 `false` 放宽为 `true` 时，Core 会拒绝决定并保持 Candidate 待审核。
 
 ## 当前核心对象
 
@@ -70,7 +70,7 @@ ImportSource → ImportJob → Observation → Candidate → 用户决定 → Me
 ```powershell
 cd core
 
-# 允许已确认的记忆跨会话用于内部理解。
+# 可选：调整已确认记忆的用户级跨会话总开关。
 uv run htc-core --db .\demo.sqlite3 policy --input .\policy.json
 
 # 注册一个由用户选择的来源。
@@ -89,7 +89,7 @@ uv run htc-core --db .\demo.sqlite3 bootstrap --input .\snapshot.json
 - 不读取宿主私有 SQLite、缓存或隐藏会话数据库。
 - 来源、作业、候选与基线快照都验证同一用户归属。
 - 历史导入不绕过 Candidate Inbox。
-- 旧 FR-007 SQLite 数据库会通过增量迁移获得新的用户级跨会话授权字段。
+- 旧 FR-007 SQLite 数据库会通过增量迁移获得新的用户级跨会话授权字段；已有明确关闭值保持不变，新用户使用开启默认值。
 - 重复导入同一来源记录不会生成重复候选。
 - 负面或敏感信息不会因为导入而自动获得主动提及授权。
 

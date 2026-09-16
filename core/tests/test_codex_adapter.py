@@ -93,7 +93,7 @@ def test_hook_never_injects_internal_only_raw_summary(tmp_path):
     )
     context = result["hookSpecificOutput"]["additionalContext"]
     assert "秘密评审" not in context
-    assert "respond gently" in context
+    assert "Ask whether the user wants to discuss a relevant sensitive topic." in context
 
 
 def test_stop_records_hash_only_and_does_not_create_candidate(tmp_path):
@@ -312,3 +312,37 @@ def test_default_hook_capture_is_hash_only(tmp_path):
         for value in row
     )
     assert "私人计划" not in serialized_database_text
+
+
+def test_plain_continue_does_not_create_candidate_but_future_and_remember_do(tmp_path):
+    configured = settings(tmp_path)
+    core = open_runtime(configured)
+
+    handle_user_prompt_submit(
+        {"session_id": "signals", "turn_id": "plain", "prompt": "继续吧"},
+        core=core,
+        settings=configured,
+        observed_at="2030-07-19T09:00:00+08:00",
+    )
+    assert core.repo.candidates(configured.user_id) == []
+
+    handle_user_prompt_submit(
+        {"session_id": "signals", "turn_id": "future", "prompt": "明天整理发布说明"},
+        core=core,
+        settings=configured,
+        observed_at="2030-07-19T09:01:00+08:00",
+    )
+    handle_user_prompt_submit(
+        {"session_id": "signals", "turn_id": "remember", "prompt": "记住我偏好简洁的说明"},
+        core=core,
+        settings=configured,
+        observed_at="2030-07-19T09:02:00+08:00",
+    )
+
+    candidates = core.repo.candidates(configured.user_id)
+    assert {candidate.kind for candidate in candidates} == {"Intention", "Fact"}
+    traces = core.repo.db.execute(
+        "SELECT reason_codes_json,input_summary FROM decision_traces WHERE subject_type='adapter'"
+    ).fetchall()
+    assert any("no_temporal_or_continuity_signal" in row[0] for row in traces)
+    assert all("继续吧" not in row[1] for row in traces)

@@ -51,3 +51,4 @@ core/.tmp-fr*/
 .impeccable/
 
 .tmp-public-pytest/
+.tmp-status/

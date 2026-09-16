@@ -50,9 +50,14 @@ type MemoryDto = {
   sensitivity: string;
   intention_state: string | null;
   outcome: string | null;
+  closed_at: string | null;
   persist_consent: boolean;
   cross_session_consent: boolean;
   proactive_consent: boolean;
+  recall_allowed: boolean;
+  surface_mode: "silent" | "on_user_topic" | "gentle_prompt";
+  max_per_conversation: number;
+  min_gap_turns: number;
   revision: number;
   source_ids: string[];
   sources: Array<{
@@ -84,6 +89,19 @@ type StatusDto = {
   cross_session_internal_use: boolean;
   current_memories: number;
   pending_candidates: number;
+  current_state: CurrentStateDto | null;
+};
+
+type CurrentStateDto = {
+  user_id: string;
+  label: string;
+  tone: "steady" | "strained" | "low" | "hopeful" | "uncertain" | "energized";
+  since: string;
+  status: "current" | "aged";
+  source_memory_ids: string[];
+  revision: number;
+  updated_at: string;
+  age_days: number;
 };
 
 type MemoryExplanationDto = {
@@ -103,6 +121,7 @@ type RecallPreviewDto = {
   purpose: string;
   issued_at: string;
   expires_at: string;
+  reason_codes?: string[];
   items: Array<{
     memory_id: string;
     category: "allowed_to_use" | "internal_only" | "confirm_first";
@@ -235,7 +254,11 @@ function chapterFromMemory(memory: MemoryDto, index: number): MemoryChapter {
     sources: memory.sources.length
       ? memory.sources.map((source) => `${formatLocalTime(source.observed_at)} · ${source.excerpt}`)
       : memory.source_ids,
-    tags: [memory.kind, memory.sensitivity, memory.proactive_consent ? "允许主动提及" : "不主动提"],
+    tags: [
+      memory.kind,
+      memory.sensitivity,
+      memory.surface_mode === "on_user_topic" ? "问到时可用" : memory.surface_mode === "silent" ? "静默使用" : "轻提示",
+    ],
   };
 }
 
@@ -453,6 +476,21 @@ export function App() {
     });
   }
 
+  async function updateCurrentState(input: {
+    label: string;
+    tone: CurrentStateDto["tone"];
+    since: string;
+    expected_revision?: number;
+  }) {
+    await runOperation(async () => {
+      await apiRequest("/state", {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+      await refreshData();
+    });
+  }
+
   async function runOperation(operation: () => Promise<void>) {
     setOperationError(null);
     try {
@@ -615,6 +653,7 @@ export function App() {
           status={status}
           onClose={() => setSettingsOpen(false)}
           onPolicyChange={updatePolicy}
+          onStateChange={updateCurrentState}
         />
       ) : null}
       {recallOpen ? <RecallPreviewDrawer status={status} onClose={() => setRecallOpen(false)} /> : null}
@@ -968,7 +1007,7 @@ function RecallPreviewDrawer({ status, onClose }: { status: StatusDto | null; on
           <section className="recall-result">
             <p className="recall-package">模拟会话 {conversationId.slice(-8)} · 短期包 {result.package_id.slice(-8)} · {formatLocalTime(result.expires_at)} 失效</p>
             {result.items.length === 0 ? (
-              <p className="recall-empty">{status && !status.cross_session_internal_use
+              <p className="recall-empty">{result.reason_codes?.includes("cross_session_policy_disabled")
                 ? "用户级跨会话记忆当前已关闭，因此 Core 没有检索任何 Memory。"
                 : "没有匹配到可用于这句话的记忆。"}</p>
             ) : null}
@@ -1011,16 +1050,42 @@ function SettingsDrawer({
   status,
   onClose,
   onPolicyChange,
+  onStateChange,
 }: {
   status: StatusDto | null;
   onClose: () => void;
   onPolicyChange: (enabled: boolean) => Promise<void>;
+  onStateChange: (input: {
+    label: string;
+    tone: CurrentStateDto["tone"];
+    since: string;
+    expected_revision?: number;
+  }) => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
+  const [stateLabel, setStateLabel] = useState(status?.current_state?.label ?? "");
+  const [stateTone, setStateTone] = useState<CurrentStateDto["tone"]>(status?.current_state?.tone ?? "steady");
+  const [stateSince, setStateSince] = useState(
+    status?.current_state?.since ?? currentDateTimeLocal(status?.timezone ?? "Asia/Shanghai"),
+  );
   async function changePolicy(enabled: boolean) {
     setSaving(true);
     try {
       await onPolicyChange(enabled);
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function saveCurrentState() {
+    if (!stateLabel.trim()) return;
+    setSaving(true);
+    try {
+      await onStateChange({
+        label: stateLabel.trim(),
+        tone: stateTone,
+        since: stateSince,
+        expected_revision: status?.current_state?.revision,
+      });
     } finally {
       setSaving(false);
     }
@@ -1039,6 +1104,42 @@ function SettingsDrawer({
           <p><span>时区</span><strong>{status?.timezone ?? "—"}</strong></p>
           <p><span>已治理记忆</span><strong>{status?.current_memories ?? 0}</strong></p>
           <p><span>待确认候选</span><strong>{status?.pending_candidates ?? 0}</strong></p>
+        </section>
+        <section className="current-state-editor">
+          <div>
+            <h3>当前状态</h3>
+            <p>只影响此刻召回的语气，不会自动成为永久记忆。</p>
+          </div>
+          <label>
+            状态标签
+            <input
+              maxLength={120}
+              onChange={(event) => setStateLabel(event.target.value)}
+              placeholder="例如：专注收尾"
+              value={stateLabel}
+            />
+          </label>
+          <label>
+            粗粒度语气
+            <select onChange={(event) => setStateTone(event.target.value as CurrentStateDto["tone"])} value={stateTone}>
+              <option value="steady">平稳</option>
+              <option value="strained">紧绷</option>
+              <option value="low">低落</option>
+              <option value="hopeful">有希望</option>
+              <option value="uncertain">不确定</option>
+              <option value="energized">有能量</option>
+            </select>
+          </label>
+          <label>
+            从何时开始
+            <input onChange={(event) => setStateSince(event.target.value)} type="datetime-local" value={toDateTimeLocal(stateSince)} />
+          </label>
+          {status?.current_state ? (
+            <small>{status.current_state.status === "aged" ? "这条状态可能已经过时" : "当前有效"} · 已持续 {status.current_state.age_days} 天</small>
+          ) : null}
+          <button className="quiet-action primary" disabled={saving || !stateLabel.trim()} onClick={() => void saveCurrentState()} type="button">
+            保存当前状态
+          </button>
         </section>
         <section className="policy-card">
           <div>
@@ -1172,4 +1273,26 @@ function formatLocalTime(value: string) {
     minute: "2-digit",
     timeZone: "Asia/Shanghai",
   }).format(date);
+}
+
+function toDateTimeLocal(value: string) {
+  return value.length >= 16 ? value.slice(0, 16) : value;
+}
+
+function currentDateTimeLocal(timeZone: string) {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZone,
+    })
+      .formatToParts(new Date())
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
 }

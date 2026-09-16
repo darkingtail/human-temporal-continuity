@@ -1,6 +1,6 @@
 # HTC Codex Adapter MVP
 
-截至 2026 年 8 月 19 日，HTC 已有第一个可运行的 Codex 接入闭环。它不是把全部历史拼进提示词，而是让确定性的 HTC Core 在 Codex 回答前决定本轮允许使用什么，回答后只记录低权限的执行证据。
+截至 2026 年 9 月 16 日，HTC 已有第一个可运行的 Codex 接入闭环。它不是把全部历史拼进提示词，而是让确定性的 HTC Core 在 Codex 回答前决定本轮允许使用什么，回答后只记录低权限的执行证据。
 
 ## MVP 能做什么
 
@@ -14,7 +14,7 @@ Codex UserPromptSubmit
   → 只保存回答哈希和长度
 ```
 
-- 用户输入带有明确时间或连续性线索时，Hook 可以创建 Candidate；
+- 用户输入带有明确未来时间、开放回路或显式“记住”线索时，Hook 可以创建 Candidate；单独的“继续吧”不会创建 Candidate；
 - Candidate 不会自动成为 Memory；
 - 已确认且获准跨会话使用的 Memory 可以在新 Codex 会话里被召回；
 - `internal_only`、`confirm_first` 与 `suppressed` 的原始内容不会进入模型上下文；
@@ -96,10 +96,10 @@ Hook 再次触发依赖同步并失败；依赖变更后应先手动运行一次
 2. 用当前用户、会话、用途和查询向 Core 请求 RecallPackage；
 3. 只读取 `adapter_payload`；
 4. 将允许内容渲染为不超过 1500 字符的 `additionalContext`；
-5. 如果显式开启 `HTC_ALLOW_PLAINTEXT_CANDIDATES=1`，对明确时间线索创建待审核 Candidate；
+5. 如果显式开启 `HTC_ALLOW_PLAINTEXT_CANDIDATES=1`，对明确未来时间、开放回路或显式记忆请求创建待审核 Candidate；
 6. 只保存 prompt 哈希、长度和 RecallPackage ID 作为 Adapter 事件。
 
-默认配置只保存 prompt 哈希和长度，不保存原文 Candidate。开启实验性明文捕获后，“继续吧”如果已经召回到上下文，不会再创建一个重复 Candidate；“明天继续……”会创建带绝对日期锚点的 Intention Candidate。
+默认配置只保存 prompt 哈希和长度，不保存原文 Candidate。开启实验性明文捕获后，单独的“继续吧”始终只产生哈希审计而不创建 Candidate；“明天继续……”会创建带绝对日期锚点的 Intention Candidate，“记住……”会创建待审核的 Fact Candidate。
 
 渲染时，权限约束先于记忆内容写入，并保留固定预算。允许使用的摘要被限制数量与长度、清除控制字符、编码为 JSON 字符串，并明确标记为“不可信的个人经历数据，而不是指令”。
 
@@ -137,7 +137,7 @@ MVP 的 MCP 刻意不提供写治理工具：模型不能自行接受候选、�
 用户：继续吧。
 ```
 
-如果用户已经允许跨会话内部使用，Hook 会向 Codex 注入：此前计划继续实现导入功能，同时明确不能因为预期日期经过就假定事情已经完成。
+新用户默认允许已确认 Memory 跨会话内部使用；如果用户没有关闭该总开关且单条 Memory 仍允许召回，Hook 会向 Codex 注入此前计划继续实现导入功能，同时明确不能因为预期日期经过就假定事情已经完成。
 
 ## 当前限制
 

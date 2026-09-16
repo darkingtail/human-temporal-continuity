@@ -13,8 +13,9 @@ from .runtime import RuntimeSettings, open_runtime, settings_from_env
 
 MAX_PROMPT_CHARS = 10_000
 MAX_CONTEXT_CHARS = 1_500
-TEMPORAL_CUES = ("明天", "后天", "今晚", "今天", "昨天", "下次", "以后")
-CONTINUITY_CUES = ("继续", "接着", "还没", "仍然", "上次", "之前")
+TEMPORAL_CUES = ("明天", "后天", "今晚", "下次", "以后")
+OPEN_LOOP_CUES = ("还没", "尚未", "仍然", "待办", "等结果", "等回复")
+EXPLICIT_MEMORY_CUES = ("记住", "别忘了", "以后提醒", "我的偏好", "我习惯")
 NEGATIVE_CUES = ("难过", "焦虑", "害怕", "孤独", "后悔", "生气")
 
 
@@ -31,11 +32,12 @@ def _required_text(event: dict[str, Any], key: str, *, limit: int = 500) -> str:
 
 def proposal_from_prompt(prompt: str) -> dict[str, Any] | None:
     has_temporal = any(cue in prompt for cue in TEMPORAL_CUES)
-    has_continuity = any(cue in prompt for cue in CONTINUITY_CUES)
-    if not has_temporal and not has_continuity:
+    has_open_loop = any(cue in prompt for cue in OPEN_LOOP_CUES)
+    has_explicit_memory = any(cue in prompt for cue in EXPLICIT_MEMORY_CUES)
+    if not has_temporal and not has_open_loop and not has_explicit_memory:
         return None
     non_actual = any(cue in prompt for cue in ("测试", "假设", "如果", "比如", "引用", "角色扮演"))
-    kind = "Intention" if any(cue in prompt for cue in ("明天", "后天", "下次", "以后", "继续")) else "Episode"
+    kind = "Intention" if has_temporal or has_open_loop else "Fact"
     relative = "tomorrow" if "明天" in prompt else None
     time: dict[str, Any] = {}
     if relative:
@@ -87,6 +89,9 @@ def handle_user_prompt_submit(
     turn_id = _required_text(event, "turn_id")
     prompt = _required_text(event, "prompt", limit=MAX_PROMPT_CHARS)
     current = observed_at or now_iso(resolved.timezone)
+    turn_index = event.get("turn_index")
+    if isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
+        turn_index = None
     package = runtime.recall(
         {
             "user_id": resolved.user_id,
@@ -95,15 +100,12 @@ def handle_user_prompt_submit(
             "query": prompt,
             "now": current,
             "ttl_minutes": 10,
+            **({"turn_index": turn_index} if turn_index is not None else {}),
         }
     )
     context = render_recall_context(package)
     proposal = proposal_from_prompt(prompt)
-    # A bare continuation cue that successfully recalled context is not a new
-    # durable claim. Explicit temporal language still creates a review Candidate.
-    if resolved.allow_plaintext_candidates and proposal and (
-        any(cue in prompt for cue in TEMPORAL_CUES) or not context
-    ):
+    if resolved.allow_plaintext_candidates and proposal:
         stable = hashlib.sha256(
             f"{resolved.user_id}\0{conversation_id}\0{turn_id}".encode()
         ).hexdigest()[:24]
@@ -120,6 +122,21 @@ def handle_user_prompt_submit(
             },
             proposal,
         )
+    elif resolved.allow_plaintext_candidates:
+        runtime.repo.ensure_user(resolved.user_id)
+        with runtime.repo.tx():
+            runtime.repo.trace_for_user(
+                trace_id=f"trace-adapter-{conversation_id}-{turn_id}",
+                user_id=resolved.user_id,
+                subject_type="adapter",
+                subject_id=f"{conversation_id}:{turn_id}",
+                reasons=("no_temporal_or_continuity_signal",),
+                summary=(
+                    "prompt_sha256=" + hashlib.sha256(prompt.encode()).hexdigest()
+                    + f";prompt_chars={len(prompt)}"
+                ),
+                now=current,
+            )
     with runtime.repo.tx():
         runtime.repo.record_adapter_event(
             event_id=f"codex-user-{conversation_id}-{turn_id}",

@@ -75,7 +75,7 @@ def test_vertical_slice_anchors_tomorrow_and_keeps_unknown():
     assert core.explain("trace-recall-" + recalled["package_id"], user_id="user-1")["subject_type"] == "recall"
 
 
-def test_cross_session_is_not_granted_before_user_policy():
+def test_cross_session_is_enabled_by_default_and_can_be_revoked():
     core = make_core(cross_session=False)
     observe(core, summary="private default policy", kind="State", turn="policy-default")
     accepted = core.decide("candidate-policy-default", "accept", "2030-07-18T23:41:00+08:00")
@@ -89,9 +89,9 @@ def test_cross_session_is_not_granted_before_user_policy():
         }
     )
     assert accepted["status"] == "accepted"
-    assert recalled["items"] == []
+    assert recalled["items"][0]["category"] == "allowed_to_use"
     core.set_user_policy(
-        "user-1", "2030-07-19T09:01:00+08:00", cross_session_internal_use=True
+        "user-1", "2030-07-19T09:01:00+08:00", cross_session_internal_use=False
     )
     assert core.recall(
         {
@@ -101,7 +101,7 @@ def test_cross_session_is_not_granted_before_user_policy():
             "query": "private default",
             "now": "2030-07-19T09:02:00+08:00",
         }
-    )["items"][0]["category"] == "allowed_to_use"
+    )["reason_codes"] == ["cross_session_policy_disabled"]
 
 
 def test_non_actual_speech_never_becomes_memory():
@@ -112,7 +112,7 @@ def test_non_actual_speech_never_becomes_memory():
     assert core.repo.memories("user-1") == []
 
 
-def test_negative_affect_is_internal_only_by_default():
+def test_sensitive_negative_affect_requires_confirmation():
     core = make_core()
     observe(core, summary="今天评审没通过，我很沮丧。", kind="State", sensitivity="personal")
     accepted = core.decide("candidate-t1", "accept", "2030-07-18T23:41:00+08:00")
@@ -126,7 +126,7 @@ def test_negative_affect_is_internal_only_by_default():
             "now": "2030-07-19T09:00:00+08:00",
         }
     )
-    assert recalled["items"][0]["category"] == "internal_only"
+    assert recalled["items"][0]["category"] == "confirm_first"
     assert recalled["items"][0]["summary"] is None
 
 
@@ -145,7 +145,10 @@ def test_do_not_proactively_mention_invalidates_old_package():
     )
     assert core.validate_package(package["package_id"], "2030-07-19T09:01:00+08:00")
     core.set_permissions(
-        accepted["memory_id"], "2030-07-19T09:02:00+08:00", proactive_expression=False
+        accepted["memory_id"],
+        "2030-07-19T09:02:00+08:00",
+        proactive_expression=False,
+        surface_mode="silent",
     )
     assert not core.validate_package(package["package_id"], "2030-07-19T09:03:00+08:00")
     newer = core.recall(
@@ -535,8 +538,8 @@ def test_existing_fr007_database_gets_additive_migration(tmp_path):
     db.commit()
     db.close()
     repo = SQLiteRepository(path)
-    assert repo.user_policy("legacy-user") == {"cross_session_internal_use": False}
-    assert repo.db.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert repo.user_policy("legacy-user") == {"cross_session_internal_use": True}
+    assert repo.db.execute("PRAGMA user_version").fetchone()[0] == 6
 
 
 def test_global_cross_session_gate_does_not_override_memory_choice():

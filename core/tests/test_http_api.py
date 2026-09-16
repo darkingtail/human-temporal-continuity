@@ -118,10 +118,10 @@ def test_http_api_reads_real_core_and_governs_memory(tmp_path: Path) -> None:
             {"query": "继续整理", "conversation_id": "preview-2", "now": "2030-07-18T23:43:00+08:00"},
         )
         assert status == 200
-        assert payload["data"]["items"][0]["category"] == "internal_only"
-        assert payload["data"]["items"][0]["summary"] is None
+        assert payload["data"]["items"][0]["category"] == "allowed_to_use"
+        assert payload["data"]["items"][0]["summary"] == "明天继续整理资料"
         assert payload["data"]["items"][0]["display_summary"] == "明天继续整理资料"
-        assert payload["data"]["adapter_payload"]["allowed_memories"] == []
+        assert payload["data"]["adapter_payload"]["allowed_memories"][0]["summary"] == "明天继续整理资料"
 
         status, payload = _request(
             base,
@@ -685,6 +685,186 @@ def test_conversation_audit_projects_sources_and_adapter_only_sessions(tmp_path:
         status, payload = _request(base, "/api/conversations/other-user-conversation")
         assert status == 404
         assert payload["error"]["code"] == "conversation_not_found"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_http_api_exposes_current_state_intention_and_surface_policy(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    core = SilentCore(SQLiteRepository(settings.database_path))
+    core.observe(
+        {
+            "user_id": "user-1",
+            "conversation_id": "lifecycle-source",
+            "turn_id": "lifecycle-turn",
+            "observed_at": "2026-09-16T09:00:00+08:00",
+            "timezone": "Asia/Shanghai",
+            "role": "user",
+            "excerpt": "明天完成纵切",
+        },
+        {
+            "candidate_id": "lifecycle-candidate",
+            "kind": "Intention",
+            "summary": "明天完成纵切",
+            "time": {"expected_at": "2026-09-17", "precision": "day"},
+        },
+    )
+    memory_id = core.decide(
+        "lifecycle-candidate", "accept", "2026-09-16T09:01:00+08:00"
+    )["memory_id"]
+    core.observe(
+        {
+            "user_id": "user-1",
+            "conversation_id": "permission-source",
+            "turn_id": "permission-turn",
+            "observed_at": "2026-09-16T09:02:00+08:00",
+            "timezone": "Asia/Shanghai",
+            "role": "user",
+            "excerpt": "记住但不要跨会话使用",
+        },
+        {
+            "candidate_id": "permission-candidate-api",
+            "kind": "Fact",
+            "summary": "记住但不要跨会话使用",
+            "permissions": {"cross_session_internal_use": False},
+        },
+    )
+    ready: queue.Queue = queue.Queue()
+
+    def serve() -> None:
+        server = create_server(settings, host="127.0.0.1", port=0)
+        ready.put(server)
+        server.serve_forever()
+        server.server_close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    server = ready.get(timeout=2)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(
+            base,
+            "/api/state",
+            {
+                "label": "专注收尾",
+                "tone": "strained",
+                "since": "2026-09-16T08:00",
+                "source_memory_ids": [memory_id],
+                "now": "2026-09-16T09:02:00+08:00",
+            },
+        )
+        assert status == 200
+        assert payload["data"]["label"] == "专注收尾"
+        assert payload["data"]["since"] == "2026-09-16T08:00:00+08:00"
+
+        status, payload = _request(
+            base,
+            "/api/candidates/permission-candidate-api/decide",
+            {"decision": "accept"},
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "candidate_permissions_require_confirmation"
+
+        status, payload = _request(
+            base,
+            "/api/candidates/permission-candidate-api/decide",
+            {
+                "decision": "accept",
+                "permissions": {"cross_session_internal_use": False},
+            },
+        )
+        assert status == 200
+        assert core.repo.memory(payload["data"]["memory_id"]).cross_session_consent is False
+
+        status, payload = _request(base, "/api/state")
+        assert status == 200
+        assert payload["data"]["state"]["tone"] == "strained"
+
+        status, payload = _request(
+            base,
+            f"/api/memories/{memory_id}/surface-policy",
+            {
+                "expected_revision": 1,
+                "recall_allowed": True,
+                "surface_mode": "silent",
+                "max_per_conversation": 1,
+                "min_gap_turns": 5,
+            },
+        )
+        assert status == 200
+        assert payload["data"]["surface_mode"] == "silent"
+
+        status, payload = _request(
+            base,
+            f"/api/memories/{memory_id}/intention",
+            {"expected_revision": 2, "intention_state": "active"},
+        )
+        assert status == 200
+        assert payload["data"]["intention_state"] == "active"
+
+        status, payload = _request(base, f"/api/memories/{memory_id}")
+        assert status == 200
+        assert payload["data"]["surface_mode"] == "silent"
+        assert payload["data"]["min_gap_turns"] == 5
+        assert payload["data"]["intention_state"] == "active"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def test_http_api_rejects_invalid_state_since_and_reads_legacy_bad_state(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    repository = SQLiteRepository(settings.database_path)
+    repository.ensure_user("user-1")
+    repository.db.execute(
+        """INSERT INTO states(
+               user_id,label,tone,since,status,source_memory_ids_json,revision,updated_at
+           ) VALUES (?,?,?,?,?,?,?,?)""",
+        (
+            "user-1",
+            "历史坏数据",
+            "uncertain",
+            "not-a-date",
+            "current",
+            "[]",
+            1,
+            "2026-09-16T23:00:00+08:00",
+        ),
+    )
+    repository.db.commit()
+    repository.db.close()
+    ready: queue.Queue = queue.Queue()
+
+    def serve() -> None:
+        server = create_server(settings, host="127.0.0.1", port=0)
+        ready.put(server)
+        server.serve_forever()
+        server.server_close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    server = ready.get(timeout=2)
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, payload = _request(base, "/api/state")
+        assert status == 200
+        assert payload["data"]["state"]["status"] == "invalid"
+        assert payload["data"]["state"]["reason_codes"] == ["invalid_state_since"]
+
+        status, payload = _request(
+            base,
+            "/api/state",
+            {
+                "label": "新的状态",
+                "tone": "steady",
+                "since": "not-a-date",
+            },
+        )
+        assert status == 400
+        assert payload["error"]["code"] == "invalid_state_since"
     finally:
         server.shutdown()
         thread.join(timeout=2)

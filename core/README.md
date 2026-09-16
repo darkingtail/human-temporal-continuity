@@ -49,7 +49,8 @@ ImportSource -> ImportJob -> Observation -> Candidate -> decide -> Memory
 
 An import is not memory authorization. Imported material enters Candidate Inbox;
 only a user decision can promote it to Memory. Cross-conversation internal use is
-a separate user-level permission and defaults to off.
+a separate user-level permission. It defaults to on for new users, can be
+revoked globally, and never grants proactive expression by itself.
 
 See [Bootstrap 与记忆恢复](../docs/bootstrap-memory-recovery.md) for the
 product model, boundaries, and JSON CLI flow.
@@ -105,6 +106,14 @@ owner-visible category view and the narrower `adapter_payload` that a host may
 consume. Each preview creates an audited RecallPackage: its authorization
 expires, but its minimized package and trace records are not automatically
 physically deleted.
+
+Memory records default to user-topic recall with proactive expression off.
+Workbench can edit the per-memory surface policy (`silent`, `on_user_topic`, or
+`gentle_prompt`), recall allowance, conversation cap, and turn gap. Intention
+memories move through `planned`, `active`, `paused`, `completed`, and
+`cancelled`; terminal transitions preserve `closed_at` and reject later edits.
+The user-level current state is a separate, editable record exposed at
+`GET/POST /api/state`; it can age without becoming a durable Memory.
 
 `GET /api/conversations` and `GET /api/conversations/{conversation_id}` expose a
 user-scoped audit projection over HTC-owned Observations and Adapter Events.

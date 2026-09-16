@@ -23,16 +23,17 @@ from .models import (
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
-CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, revocation_epoch INTEGER NOT NULL DEFAULT 0, package_version INTEGER NOT NULL DEFAULT 0, cross_session_consent INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, revocation_epoch INTEGER NOT NULL DEFAULT 0, package_version INTEGER NOT NULL DEFAULT 0, cross_session_consent INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS observations (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL REFERENCES conversations(id), turn_id TEXT NOT NULL, observed_at TEXT NOT NULL, timezone TEXT NOT NULL, role TEXT NOT NULL, content_hash TEXT NOT NULL, excerpt TEXT NOT NULL, speech_act TEXT NOT NULL, UNIQUE(conversation_id, turn_id));
 CREATE TABLE IF NOT EXISTS candidates (id TEXT PRIMARY KEY, observation_id TEXT NOT NULL REFERENCES observations(id), user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, summary TEXT NOT NULL, speech_act TEXT NOT NULL, status TEXT NOT NULL, confidence REAL NOT NULL, time_json TEXT NOT NULL, sensitivity TEXT NOT NULL, permissions_json TEXT NOT NULL, attributes_json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, summary TEXT NOT NULL, epistemic_status TEXT NOT NULL, speech_act TEXT NOT NULL, time_json TEXT NOT NULL, sensitivity TEXT NOT NULL, intention_state TEXT, outcome TEXT, persist_consent INTEGER NOT NULL, cross_session_consent INTEGER NOT NULL, proactive_consent INTEGER NOT NULL, revision INTEGER NOT NULL, revocation_epoch INTEGER NOT NULL, current INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL, summary TEXT NOT NULL, epistemic_status TEXT NOT NULL, speech_act TEXT NOT NULL, time_json TEXT NOT NULL, sensitivity TEXT NOT NULL, intention_state TEXT, outcome TEXT, persist_consent INTEGER NOT NULL, cross_session_consent INTEGER NOT NULL, proactive_consent INTEGER NOT NULL, revision INTEGER NOT NULL, revocation_epoch INTEGER NOT NULL, current INTEGER NOT NULL DEFAULT 1, closed_at TEXT, recall_allowed INTEGER NOT NULL DEFAULT 1, surface_mode TEXT NOT NULL DEFAULT 'on_user_topic', max_per_conversation INTEGER NOT NULL DEFAULT 2, min_gap_turns INTEGER NOT NULL DEFAULT 3);
 CREATE TABLE IF NOT EXISTS memory_sources (memory_id TEXT NOT NULL REFERENCES memories(id), source_id TEXT NOT NULL, PRIMARY KEY(memory_id, source_id));
 CREATE TABLE IF NOT EXISTS memory_events (id INTEGER PRIMARY KEY AUTOINCREMENT, memory_id TEXT NOT NULL REFERENCES memories(id), event_type TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS decision_traces (id TEXT PRIMARY KEY, subject_type TEXT NOT NULL, subject_id TEXT NOT NULL, reason_codes_json TEXT NOT NULL, input_summary TEXT NOT NULL, created_at TEXT NOT NULL, user_id TEXT REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS recall_packages (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, purpose TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL, package_version INTEGER NOT NULL, revocation_epoch INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS recall_items (package_id TEXT NOT NULL REFERENCES recall_packages(id), memory_id TEXT NOT NULL REFERENCES memories(id), category TEXT NOT NULL, summary TEXT, guidance TEXT, source_ids_json TEXT NOT NULL, reason_codes_json TEXT NOT NULL, PRIMARY KEY(package_id, memory_id));
+CREATE TABLE IF NOT EXISTS memory_recall_usage (memory_id TEXT NOT NULL REFERENCES memories(id), conversation_id TEXT NOT NULL, recall_count INTEGER NOT NULL DEFAULT 0, last_turn_index INTEGER, updated_at TEXT NOT NULL, PRIMARY KEY(memory_id, conversation_id));
 CREATE TABLE IF NOT EXISTS entities (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), canonical_name TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, UNIQUE(user_id, canonical_name));
 CREATE TABLE IF NOT EXISTS entity_aliases (entity_id TEXT NOT NULL REFERENCES entities(id), alias TEXT NOT NULL, status TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(entity_id, alias));
 CREATE TABLE IF NOT EXISTS lived_contexts (user_id TEXT PRIMARY KEY REFERENCES users(id), context TEXT NOT NULL, status TEXT NOT NULL, observed_at TEXT NOT NULL, timezone TEXT NOT NULL, source_id TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS import_jobs (id TEXT PRIMARY KEY, source_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS import_records (job_id TEXT NOT NULL REFERENCES import_jobs(id), source_record_id TEXT NOT NULL, observation_id TEXT, candidate_id TEXT, status TEXT NOT NULL, PRIMARY KEY(job_id, source_record_id));
 CREATE TABLE IF NOT EXISTS bootstrap_snapshots (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), mode TEXT NOT NULL, source_ids_json TEXT NOT NULL, job_ids_json TEXT NOT NULL, candidate_ids_json TEXT NOT NULL, established_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS adapter_events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, turn_id TEXT NOT NULL, event_type TEXT NOT NULL, occurred_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS states (user_id TEXT PRIMARY KEY REFERENCES users(id), label TEXT NOT NULL, tone TEXT NOT NULL, since TEXT NOT NULL, status TEXT NOT NULL, source_memory_ids_json TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
 """
 
 
@@ -60,10 +62,23 @@ class SQLiteRepository:
         columns = {
             row[1] for row in self.db.execute("PRAGMA table_info(users)").fetchall()
         }
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if "cross_session_consent" not in columns:
             self.db.execute(
-                "ALTER TABLE users ADD COLUMN cross_session_consent INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE users ADD COLUMN cross_session_consent INTEGER NOT NULL DEFAULT 1"
             )
+        memory_columns = {
+            row[1] for row in self.db.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        for name, definition in (
+            ("closed_at", "TEXT"),
+            ("recall_allowed", "INTEGER NOT NULL DEFAULT 1"),
+            ("surface_mode", "TEXT NOT NULL DEFAULT 'on_user_topic'"),
+            ("max_per_conversation", "INTEGER NOT NULL DEFAULT 2"),
+            ("min_gap_turns", "INTEGER NOT NULL DEFAULT 3"),
+        ):
+            if name not in memory_columns:
+                self.db.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
         trace_columns = {
             row[1] for row in self.db.execute("PRAGMA table_info(decision_traces)").fetchall()
         }
@@ -99,9 +114,8 @@ class SQLiteRepository:
                    WHERE subject_type='lived_context' AND user_id IS NULL
                    AND subject_id IN (SELECT id FROM users)"""
             )
-        version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version < 3:
-            self.db.execute("PRAGMA user_version=3")
+        if version < 6:
+            self.db.execute("PRAGMA user_version=6")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -113,7 +127,7 @@ class SQLiteRepository:
             raise
 
     def ensure_user(self, user_id: str) -> None:
-        self.db.execute("INSERT OR IGNORE INTO users(id) VALUES (?)", (user_id,))
+        self.db.execute("INSERT OR IGNORE INTO users(id,cross_session_consent) VALUES (?,1)", (user_id,))
 
     def user_policy(self, user_id: str) -> dict[str, bool]:
         self.ensure_user(user_id)
@@ -223,7 +237,12 @@ class SQLiteRepository:
         self, m: Memory, source_ids: tuple[str, ...], event_type: str, now: str
     ) -> None:
         self.db.execute(
-            "INSERT INTO memories VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO memories(
+                id,user_id,kind,summary,epistemic_status,speech_act,time_json,sensitivity,
+                intention_state,outcome,persist_consent,cross_session_consent,proactive_consent,
+                revision,revocation_epoch,current,closed_at,recall_allowed,surface_mode,
+                max_per_conversation,min_gap_turns
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 m.id,
                 m.user_id,
@@ -241,6 +260,11 @@ class SQLiteRepository:
                 m.revision,
                 m.revocation_epoch,
                 1,
+                m.closed_at,
+                int(m.recall_allowed),
+                m.surface_mode,
+                m.max_per_conversation,
+                m.min_gap_turns,
             ),
         )
         self.db.executemany(
@@ -278,6 +302,11 @@ class SQLiteRepository:
             bool(r["proactive_consent"]),
             r["revision"],
             r["revocation_epoch"],
+            r["closed_at"],
+            bool(r["recall_allowed"]),
+            r["surface_mode"],
+            r["max_per_conversation"],
+            r["min_gap_turns"],
             sources,
         )
 
@@ -377,7 +406,67 @@ class SQLiteRepository:
             "INSERT INTO memory_events(memory_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
             (memory_id, event_type, dump({"source_id": source_id}), now),
         )
+        self.reset_memory_recall_usage(memory_id)
         return self.memory(memory_id)
+
+    def update_intention(
+        self,
+        memory_id: str,
+        *,
+        expected_revision: int,
+        intention_state: str,
+        outcome: str,
+        closed_at: str | None,
+        now: str,
+    ) -> Memory:
+        memory = self.memory(memory_id)
+        if memory.revision != expected_revision:
+            raise ValueError("revision_conflict")
+        self.db.execute(
+            "UPDATE memories SET intention_state=?, outcome=?, closed_at=?, revision=revision+1 WHERE id=?",
+            (intention_state, outcome, closed_at, memory_id),
+        )
+        self.db.execute(
+            "INSERT INTO memory_events(memory_id,event_type,payload_json,created_at) VALUES (?,?,?,?)",
+            (memory_id, "intention_state_changed", dump({"intention_state": intention_state, "outcome": outcome, "closed_at": closed_at}), now),
+        )
+        self.reset_memory_recall_usage(memory_id)
+        return self.memory(memory_id)
+
+    def current_state(self, user_id: str) -> dict[str, Any] | None:
+        row = self.db.execute("SELECT * FROM states WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            **dict(row),
+            "source_memory_ids": load(row["source_memory_ids_json"], []),
+        }
+
+    def save_current_state(
+        self,
+        *,
+        user_id: str,
+        label: str,
+        tone: str,
+        since: str,
+        status: str,
+        source_memory_ids: tuple[str, ...],
+        now: str,
+        expected_revision: int | None,
+    ) -> dict[str, Any]:
+        previous = self.current_state(user_id)
+        if expected_revision is not None and (not previous or previous["revision"] != expected_revision):
+            raise ValueError("revision_conflict")
+        revision = previous["revision"] + 1 if previous else 1
+        self.db.execute(
+            """INSERT INTO states(user_id,label,tone,since,status,source_memory_ids_json,revision,updated_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET label=excluded.label,tone=excluded.tone,
+               since=excluded.since,status=excluded.status,source_memory_ids_json=excluded.source_memory_ids_json,
+               revision=excluded.revision,updated_at=excluded.updated_at""",
+            (user_id, label, tone, since, status, dump(source_memory_ids), revision, now),
+        )
+        return self.current_state(user_id) or {}
 
     def canonicalize_entity(
         self,
@@ -735,6 +824,22 @@ class SQLiteRepository:
             (trace_id, subject_type, subject_id, dump(reasons), summary, now, user_id),
         )
 
+    def trace_for_user(
+        self,
+        *,
+        trace_id: str,
+        user_id: str,
+        subject_type: str,
+        subject_id: str,
+        reasons: tuple[str, ...],
+        summary: str,
+        now: str,
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO decision_traces(id,subject_type,subject_id,reason_codes_json,input_summary,created_at,user_id) VALUES (?,?,?,?,?,?,?)",
+            (trace_id, subject_type, subject_id, dump(reasons), summary, now, user_id),
+        )
+
     def _trace_user_id(self, subject_type: str, subject_id: str) -> str | None:
         lookups = {
             "candidate": ("candidates", "id"),
@@ -801,6 +906,53 @@ class SQLiteRepository:
                 )
                 for i in p.items
             ],
+        )
+
+    def next_recall_turn_index(self, user_id: str, conversation_id: str) -> int:
+        row = self.db.execute(
+            """SELECT COUNT(*) FROM recall_packages
+               WHERE user_id=? AND conversation_id=?""",
+            (user_id, conversation_id),
+        ).fetchone()
+        return int(row[0]) + 1
+
+    def memory_recall_usage(self, memory_id: str, conversation_id: str) -> dict[str, Any]:
+        row = self.db.execute(
+            """SELECT recall_count,last_turn_index,updated_at
+               FROM memory_recall_usage WHERE memory_id=? AND conversation_id=?""",
+            (memory_id, conversation_id),
+        ).fetchone()
+        if not row:
+            return {"recall_count": 0, "last_turn_index": None, "updated_at": None}
+        return {
+            "recall_count": int(row["recall_count"]),
+            "last_turn_index": row["last_turn_index"],
+            "updated_at": row["updated_at"],
+        }
+
+    def record_memory_recall(
+        self,
+        memory_id: str,
+        conversation_id: str,
+        *,
+        turn_index: int,
+        now: str,
+    ) -> None:
+        self.db.execute(
+            """INSERT INTO memory_recall_usage(
+                   memory_id,conversation_id,recall_count,last_turn_index,updated_at
+               ) VALUES (?,?,1,?,?)
+               ON CONFLICT(memory_id,conversation_id) DO UPDATE SET
+                   recall_count=memory_recall_usage.recall_count+1,
+                   last_turn_index=excluded.last_turn_index,
+                   updated_at=excluded.updated_at""",
+            (memory_id, conversation_id, turn_index, now),
+        )
+
+    def reset_memory_recall_usage(self, memory_id: str) -> None:
+        self.db.execute(
+            "DELETE FROM memory_recall_usage WHERE memory_id=?",
+            (memory_id,),
         )
 
     def package(self, pid: str) -> RecallPackage:

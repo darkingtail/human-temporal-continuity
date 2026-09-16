@@ -20,6 +20,8 @@ from .models import (
 from .repository import SQLiteRepository
 
 NON_ACTUAL = {"test", "quoted", "hypothetical", "roleplay", "uncertain"}
+INTENTION_STATES = {"planned", "active", "paused", "completed", "cancelled"}
+TERMINAL_INTENTION_STATES = {"completed", "cancelled"}
 
 
 def parse_dt(value: str) -> datetime:
@@ -144,6 +146,31 @@ class SilentCore:
                 "status": "rejected",
                 "reason_codes": ["user_rejected_candidate"],
             }
+        supported_permission_keys = {
+            "persist",
+            "cross_session_internal_use",
+            "proactive_expression",
+        }
+        if permissions is not None and any(
+            key not in supported_permission_keys or not isinstance(value, bool)
+            for key, value in permissions.items()
+        ):
+            raise ValueError("invalid_permissions")
+        if candidate.permissions:
+            if any(
+                key not in supported_permission_keys or not isinstance(value, bool)
+                for key, value in candidate.permissions.items()
+            ):
+                raise ValueError("invalid_candidate_permissions")
+            if permissions is None or any(
+                key not in permissions for key in candidate.permissions
+            ):
+                raise ValueError("candidate_permissions_require_confirmation")
+            if any(
+                proposed is False and permissions[key] is True
+                for key, proposed in candidate.permissions.items()
+            ):
+                raise ValueError("unconfirmed_permission_expansion")
         if merge_into_memory_id:
             existing = self.repo.memory(merge_into_memory_id)
             if existing.user_id != candidate.user_id:
@@ -164,6 +191,28 @@ class SilentCore:
                     time=candidate.time or existing.time,
                     source_id=candidate.observation_id,
                 )
+                if permissions:
+                    self.repo.db.execute(
+                        """UPDATE memories SET persist_consent=?,cross_session_consent=?,
+                           proactive_consent=? WHERE id=?""",
+                        (
+                            int(permissions.get("persist", merged.persist_consent)),
+                            int(
+                                permissions.get(
+                                    "cross_session_internal_use",
+                                    merged.cross_session_consent,
+                                )
+                            ),
+                            int(
+                                permissions.get(
+                                    "proactive_expression",
+                                    merged.proactive_consent,
+                                )
+                            ),
+                            merged.id,
+                        ),
+                    )
+                    merged = self.repo.memory(merged.id)
                 self.repo.set_candidate_status(candidate_id, "accepted")
                 self.repo.bump_user(candidate.user_id, revoke=True)
                 self.repo.trace(
@@ -184,7 +233,7 @@ class SilentCore:
         perms = {
             "persist": True,
             "cross_session_internal_use": True,
-            "proactive_expression": True,
+            "proactive_expression": False,
         }
         if permissions:
             perms.update(permissions)
@@ -218,6 +267,11 @@ class SilentCore:
             bool(perms["proactive_expression"]),
             1,
             self.repo.user_versions(candidate.user_id)[0],
+            None,
+            True,
+            "on_user_topic",
+            2,
+            3,
             (candidate.observation_id,),
         )
         with self.repo.tx():
@@ -239,6 +293,122 @@ class SilentCore:
             "reason_codes": [category_reason],
         }
 
+    def update_intention(
+        self,
+        memory_id: str,
+        now: str,
+        *,
+        expected_revision: int,
+        intention_state: str,
+        outcome: str | None = None,
+    ) -> dict[str, Any]:
+        if intention_state not in INTENTION_STATES:
+            raise ValueError("invalid_intention_state")
+        memory = self.repo.memory(memory_id)
+        if memory.kind.lower() != "intention":
+            raise ValueError("memory_not_intention")
+        if memory.intention_state in TERMINAL_INTENTION_STATES:
+            raise ValueError("intention_state_terminal")
+        resolved_outcome = {
+            "completed": "completed",
+            "cancelled": "cancelled",
+        }.get(intention_state, outcome or memory.outcome or "unknown")
+        if outcome is not None and outcome not in {"unknown", "completed", "cancelled"}:
+            raise ValueError("invalid_intention_outcome")
+        if intention_state not in TERMINAL_INTENTION_STATES and outcome in {"completed", "cancelled"}:
+            raise ValueError("invalid_intention_outcome")
+        if intention_state == "completed" and resolved_outcome != "completed":
+            raise ValueError("invalid_intention_outcome")
+        if intention_state == "cancelled" and resolved_outcome != "cancelled":
+            raise ValueError("invalid_intention_outcome")
+        if intention_state == "completed" and outcome not in {None, "completed"}:
+            raise ValueError("invalid_intention_outcome")
+        if intention_state == "cancelled" and outcome not in {None, "cancelled"}:
+            raise ValueError("invalid_intention_outcome")
+        closed_at = now if intention_state in TERMINAL_INTENTION_STATES else None
+        with self.repo.tx():
+            updated = self.repo.update_intention(
+                memory_id,
+                expected_revision=expected_revision,
+                intention_state=intention_state,
+                outcome=resolved_outcome,
+                closed_at=closed_at,
+                now=now,
+            )
+            self.repo.bump_user(memory.user_id, revoke=True)
+            self.repo.trace(
+                f"trace-intention-{memory_id}-{updated.revision}",
+                "governance",
+                memory_id,
+                ("intention_state_changed",),
+                intention_state,
+                now,
+            )
+        return {
+            "memory_id": memory_id,
+            "revision": updated.revision,
+            "intention_state": updated.intention_state,
+            "outcome": updated.outcome,
+            "closed_at": updated.closed_at,
+        }
+
+    def set_current_state(
+        self,
+        user_id: str,
+        *,
+        label: str,
+        tone: str,
+        since: str,
+        source_memory_ids: tuple[str, ...] = (),
+        now: str,
+        expected_revision: int | None = None,
+    ) -> dict[str, Any]:
+        if not label.strip() or not tone.strip():
+            raise ValueError("invalid_current_state")
+        try:
+            parse_dt(since)
+            parse_dt(now)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_current_state_since") from exc
+        self.repo.ensure_user(user_id)
+        previous = self.repo.current_state(user_id)
+        with self.repo.tx():
+            result = self.repo.save_current_state(
+                user_id=user_id,
+                label=label.strip(),
+                tone=tone.strip(),
+                since=since,
+                status="current",
+                source_memory_ids=source_memory_ids,
+                now=now,
+                expected_revision=expected_revision,
+            )
+            self.repo.bump_user(user_id, revoke=True)
+            self.repo.trace(
+                f"trace-state-{user_id}-{result['revision']}",
+                "lived_context",
+                user_id,
+                (("current_state_updated" if previous else "current_state_created"),),
+                label[:200],
+                now,
+            )
+        return result
+
+    def current_state(self, user_id: str, *, now: str) -> dict[str, Any] | None:
+        state = self.repo.current_state(user_id)
+        if not state:
+            return None
+        try:
+            age_days = (parse_dt(now) - parse_dt(state["since"])).days
+        except (TypeError, ValueError):
+            state["status"] = "invalid"
+            state["age_days"] = None
+            state["reason_codes"] = ["invalid_state_since"]
+            return state
+        state["status"] = "aged" if age_days >= 14 else state["status"]
+        state["age_days"] = age_days
+        return state
+
     def set_permissions(
         self,
         memory_id: str,
@@ -247,10 +417,24 @@ class SilentCore:
         expected_revision: int | None = None,
         proactive_expression: bool | None = None,
         cross_session_internal_use: bool | None = None,
+        recall_allowed: bool | None = None,
+        surface_mode: str | None = None,
+        max_per_conversation: int | None = None,
+        min_gap_turns: int | None = None,
     ) -> dict[str, Any]:
         m = self.repo.memory(memory_id)
         if expected_revision is not None and m.revision != expected_revision:
             raise ValueError("revision_conflict")
+        if surface_mode is not None and surface_mode not in {
+            "silent",
+            "on_user_topic",
+            "gentle_prompt",
+        }:
+            raise ValueError("invalid_surface_mode")
+        if max_per_conversation is not None and max_per_conversation < 0:
+            raise ValueError("invalid_max_per_conversation")
+        if min_gap_turns is not None and min_gap_turns < 0:
+            raise ValueError("invalid_min_gap_turns")
         values = {
             "proactive_expression": m.proactive_consent
             if proactive_expression is None
@@ -258,17 +442,30 @@ class SilentCore:
             "cross_session_internal_use": m.cross_session_consent
             if cross_session_internal_use is None
             else cross_session_internal_use,
+            "recall_allowed": m.recall_allowed if recall_allowed is None else recall_allowed,
+            "surface_mode": m.surface_mode if surface_mode is None else surface_mode,
+            "max_per_conversation": m.max_per_conversation
+            if max_per_conversation is None
+            else max_per_conversation,
+            "min_gap_turns": m.min_gap_turns if min_gap_turns is None else min_gap_turns,
         }
         with self.repo.tx():
             next_revision = m.revision + 1
             self.repo.db.execute(
-                "UPDATE memories SET proactive_consent=?,cross_session_consent=?,revision=revision+1 WHERE id=?",
+                """UPDATE memories SET proactive_consent=?,cross_session_consent=?,
+                   recall_allowed=?,surface_mode=?,max_per_conversation=?,min_gap_turns=?,
+                   revision=revision+1 WHERE id=?""",
                 (
                     int(values["proactive_expression"]),
                     int(values["cross_session_internal_use"]),
+                    int(values["recall_allowed"]),
+                    values["surface_mode"],
+                    values["max_per_conversation"],
+                    values["min_gap_turns"],
                     memory_id,
                 ),
             )
+            self.repo.reset_memory_recall_usage(memory_id)
             self.repo.bump_user(m.user_id, revoke=True)
             self.repo.trace(
                 f"trace-govern-{memory_id}-{next_revision}",
@@ -513,12 +710,25 @@ class SilentCore:
     def recall(self, request: dict[str, Any]) -> dict[str, Any]:
         now = request["now"]
         now_dt = parse_dt(now)
+        conversation_id = request["conversation_id"]
+        turn_index = request.get("turn_index")
+        if turn_index is None:
+            turn_index = self.repo.next_recall_turn_index(
+                request["user_id"], conversation_id
+            )
+        elif isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
+            raise ValueError("invalid_turn_index")
         revocation_epoch, package_version = self.repo.user_versions(request["user_id"])
         cross_session_enabled = self.repo.user_policy(request["user_id"])[
             "cross_session_internal_use"
         ]
         items: list[RecallItem] = []
-        query = request.get("query", "").lower()
+        query = request.get("query", "").strip().lower()
+        package_reason_codes: list[str] = []
+        if not query:
+            package_reason_codes = ["empty_query"]
+        elif not cross_session_enabled:
+            package_reason_codes = ["cross_session_policy_disabled"]
         query_terms = [token for token in re.split(r"[\s，。！？、,.!?;；:：]+", query) if token]
         for segment in tuple(query_terms):
             if re.search(r"[\u4e00-\u9fff]", segment) and len(segment) >= 3:
@@ -531,44 +741,76 @@ class SilentCore:
         for m in self.repo.memories(request["user_id"]):
             if (
                 not m.persist_consent
+                or not m.recall_allowed
                 or not cross_session_enabled
                 or not m.cross_session_consent
                 or m.epistemic_status != "current"
+                or not query
             ):
                 continue
-            relevant = not query_terms or any(token in m.summary.lower() for token in query_terms)
+            relevant = any(token in m.summary.lower() for token in query_terms)
             if not relevant:
+                continue
+            usage = self.repo.memory_recall_usage(m.id, conversation_id)
+            if usage["recall_count"] >= m.max_per_conversation:
+                package_reason_codes.append("memory_max_per_conversation_reached")
+                continue
+            last_turn_index = usage["last_turn_index"]
+            if (
+                last_turn_index is not None
+                and m.min_gap_turns > 0
+                and turn_index - int(last_turn_index) < m.min_gap_turns
+            ):
+                package_reason_codes.append("memory_min_gap_turns_not_elapsed")
                 continue
             elapsed_reason: tuple[str, ...] = ()
             expected = m.time.get("expected_at")
             if (
                 m.kind.lower() == "intention"
                 and expected
+                and m.outcome == "unknown"
+                and m.intention_state not in TERMINAL_INTENTION_STATES
                 and now_dt.date() > date.fromisoformat(expected)
             ):
-                elapsed_reason = ("expected_date_elapsed_outcome_unknown",)
-            if not m.proactive_consent:
-                category, summary, guidance, reason = (
-                    "internal_only",
-                    None,
-                    "respond gently and avoid pressure",
-                    ("proactive_expression_revoked",) + elapsed_reason,
+                elapsed_reason = (
+                    "expected_date_elapsed_outcome_unknown",
+                    "intention_overdue_open_loop",
                 )
-            elif m.sensitivity in {"sensitive", "forbidden"}:
+            if m.sensitivity in {"sensitive", "forbidden"}:
                 category, summary, guidance, reason = (
                     "confirm_first",
                     None,
                     "ask before mentioning this sensitive topic",
                     ("sensitive_requires_confirmation",) + elapsed_reason,
                 )
+            elif m.surface_mode == "silent":
+                category, summary, guidance, reason = (
+                    "internal_only",
+                    None,
+                    "use this context silently and do not reveal the memory text",
+                    ("surface_policy_silent",) + elapsed_reason,
+                )
+            elif not m.proactive_consent and m.surface_mode == "gentle_prompt":
+                category, summary, guidance, reason = (
+                    "internal_only",
+                    None,
+                    "respond gently and avoid pressure",
+                    ("gentle_prompt_without_raw_memory",) + elapsed_reason,
+                )
             else:
                 category, summary, guidance, reason = (
                     "allowed_to_use",
                     m.summary,
                     None,
-                    ("memory_relevant_and_allowed",) + elapsed_reason,
+                    (
+                        "memory_relevant_and_allowed",
+                        "user_topic_matches_surface_policy",
+                    )
+                    + elapsed_reason,
                 )
             items.append(RecallItem(m.id, category, summary, guidance, m.source_ids, reason))
+        if not items and not package_reason_codes and query:
+            package_reason_codes = ["no_matching_memory"]
         package_id = "package-" + uuid.uuid4().hex
         expires = (now_dt + timedelta(minutes=int(request.get("ttl_minutes", 10)))).isoformat()
         p = RecallPackage(
@@ -584,11 +826,18 @@ class SilentCore:
         )
         with self.repo.tx():
             self.repo.save_package(p)
+            for item in items:
+                self.repo.record_memory_recall(
+                    item.memory_id,
+                    conversation_id,
+                    turn_index=turn_index,
+                    now=now,
+                )
             self.repo.trace(
                 "trace-recall-" + package_id,
                 "recall",
                 package_id,
-                tuple(sorted({r for i in items for r in i.reason_codes})),
+                tuple(sorted({r for i in items for r in i.reason_codes} | set(package_reason_codes))),
                 (
                     "query_sha256="
                     + hashlib.sha256(request.get("query", "").encode()).hexdigest()
@@ -618,7 +867,7 @@ class SilentCore:
                 }
             ),
         }
-        return {
+        result = {
             "package_id": package_id,
             "purpose": p.purpose,
             "issued_at": p.issued_at,
@@ -638,6 +887,9 @@ class SilentCore:
             ],
             "adapter_payload": adapter_payload,
         }
+        if package_reason_codes:
+            result["reason_codes"] = list(dict.fromkeys(package_reason_codes))
+        return result
 
     def validate_package(
         self,

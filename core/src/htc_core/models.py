@@ -60,6 +60,11 @@ class Memory:
     proactive_consent: bool
     revision: int
     revocation_epoch: int
+    closed_at: str | None = None
+    recall_allowed: bool = True
+    surface_mode: str = "on_user_topic"
+    max_per_conversation: int = 2
+    min_gap_turns: int = 3
     source_ids: tuple[str, ...] = ()
 
 
