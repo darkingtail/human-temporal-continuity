@@ -252,6 +252,40 @@ def test_observe_is_idempotent_for_same_conversation_turn():
     second = observe(core, summary="same turn", turn="idem")
     assert first["status"] == "pending"
     assert second["status"] == "idempotent_replay"
+
+
+def test_observe_many_creates_one_observation_with_multiple_candidates():
+    core = make_core()
+    request = {
+        "user_id": "user-1",
+        "conversation_id": "conversation-mixed",
+        "turn_id": "mixed",
+        "observed_at": "2030-07-18T23:40:00+08:00",
+        "timezone": "Asia/Shanghai",
+        "role": "user",
+        "text": "昨天完成了初稿，明天继续修改",
+    }
+    proposals = [
+        {
+            "candidate_id": "candidate-episode",
+            "kind": "Episode",
+            "summary": "昨天完成了初稿",
+            "speech_act": "actual",
+        },
+        {
+            "candidate_id": "candidate-intention",
+            "kind": "Intention",
+            "summary": "明天继续修改",
+            "speech_act": "actual",
+            "time": {"relative": "tomorrow", "original_expression": "明天"},
+        },
+    ]
+    result = core.observe_many(request, proposals)
+
+    assert result["candidate_ids"] == ["candidate-episode", "candidate-intention"]
+    assert core.repo.candidate("candidate-intention").time["expected_at"] == "2030-07-19"
+    replay = core.observe_many(request, proposals)
+    assert replay["status"] == "idempotent_replay"
     assert len(core.repo.memories("user-1")) == 0
 
 

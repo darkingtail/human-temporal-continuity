@@ -2,11 +2,11 @@
 id: CHORE-001
 type: chore
 mode: gated
-status: done
-stage: reflect
+status: active
+stage: review
 created: 2026-09-06
 updated: 2026-09-06
-closed: 2026-09-08
+closed: null
 ---
 
 # CHORE-001: Prepare privacy-safe public repository

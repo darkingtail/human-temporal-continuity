@@ -13,10 +13,15 @@ from .runtime import RuntimeSettings, open_runtime, settings_from_env
 
 MAX_PROMPT_CHARS = 10_000
 MAX_CONTEXT_CHARS = 1_500
-TEMPORAL_CUES = ("明天", "后天", "今晚", "下次", "以后")
+TEMPORAL_CUES = ("今天", "昨天", "前天", "明天", "后天", "今晚", "下次", "以后")
 OPEN_LOOP_CUES = ("还没", "尚未", "仍然", "待办", "等结果", "等回复")
 EXPLICIT_MEMORY_CUES = ("记住", "别忘了", "以后提醒", "我的偏好", "我习惯")
-NEGATIVE_CUES = ("难过", "焦虑", "害怕", "孤独", "后悔", "生气")
+NEGATIVE_CUES = ("难过", "焦虑", "害怕", "孤独", "后悔", "生气", "累", "痛苦")
+STATE_CUES = ("最近", "现在", "目前", "一直", "仍然", "住在", "在这里工作")
+MEANING_CUES = ("让我", "使我", "因此我", "所以我", "我意识到", "我明白", "对我来说")
+INTENTION_CUES = ("打算", "准备", "计划", "再做", "继续做", "继续修改", "继续整理")
+EPISODE_CUES = ("昨天", "前天", "上周", "去年", "去了", "发生", "完成了", "离开了", "回来了")
+CLAUSE_SPLIT = re.compile(r"[。！？!?；;\n]+")
 
 
 def now_iso(timezone: str) -> str:
@@ -30,26 +35,74 @@ def _required_text(event: dict[str, Any], key: str, *, limit: int = 500) -> str:
     return value.strip()[:limit]
 
 
+def _speech_act(clause: str) -> str:
+    if any(cue in clause for cue in ("角色扮演", "扮演一下")):
+        return "roleplay"
+    if any(cue in clause for cue in ("假设", "如果")):
+        return "hypothetical"
+    if any(cue in clause for cue in ("引用", "他说", "她说")):
+        return "quoted"
+    if any(cue in clause for cue in ("测试", "比如", "举例")):
+        return "test"
+    return "actual"
+
+
+def _relative_time(clause: str) -> dict[str, Any]:
+    for expression, relative in (
+        ("后天", "day_after_tomorrow"),
+        ("明天", "tomorrow"),
+        ("今晚", "tonight"),
+        ("今天", "today"),
+        ("下次", "next_time"),
+        ("以后", "future"),
+    ):
+        if expression in clause:
+            return {"relative": relative, "original_expression": expression}
+    return {}
+
+
+def _proposal_kind(clause: str) -> str | None:
+    if any(cue in clause for cue in MEANING_CUES):
+        return "Meaning"
+    has_future_time = any(cue in clause for cue in ("明天", "后天", "今晚", "下次", "以后"))
+    if has_future_time or any(cue in clause for cue in OPEN_LOOP_CUES + INTENTION_CUES):
+        return "Intention"
+    if any(cue in clause for cue in EXPLICIT_MEMORY_CUES):
+        return "Meaning"
+    if any(cue in clause for cue in STATE_CUES) or any(cue in clause for cue in NEGATIVE_CUES):
+        return "State"
+    if any(cue in clause for cue in EPISODE_CUES):
+        return "Episode"
+    return None
+
+
+def proposals_from_prompt(prompt: str) -> list[dict[str, Any]]:
+    proposals: list[dict[str, Any]] = []
+    for raw_clause in CLAUSE_SPLIT.split(prompt):
+        clause = raw_clause.strip(" ，,：:")
+        if not clause:
+            continue
+        kind = _proposal_kind(clause)
+        if kind is None:
+            continue
+        negative = any(cue in clause for cue in NEGATIVE_CUES)
+        proposals.append(
+            {
+                "kind": kind,
+                "summary": clause[:240],
+                "speech_act": _speech_act(clause),
+                "time": _relative_time(clause),
+                "sensitivity": "personal" if negative else "normal",
+                "attributes": {"affect": "negative"} if negative else {},
+            }
+        )
+    return proposals
+
+
 def proposal_from_prompt(prompt: str) -> dict[str, Any] | None:
-    has_temporal = any(cue in prompt for cue in TEMPORAL_CUES)
-    has_open_loop = any(cue in prompt for cue in OPEN_LOOP_CUES)
-    has_explicit_memory = any(cue in prompt for cue in EXPLICIT_MEMORY_CUES)
-    if not has_temporal and not has_open_loop and not has_explicit_memory:
-        return None
-    non_actual = any(cue in prompt for cue in ("测试", "假设", "如果", "比如", "引用", "角色扮演"))
-    kind = "Intention" if has_temporal or has_open_loop else "Fact"
-    relative = "tomorrow" if "明天" in prompt else None
-    time: dict[str, Any] = {}
-    if relative:
-        time["relative"] = relative
-    return {
-        "kind": kind,
-        "summary": prompt[:240],
-        "speech_act": "test" if non_actual else "actual",
-        "time": time,
-        "sensitivity": "personal" if any(cue in prompt for cue in NEGATIVE_CUES) else "normal",
-        "attributes": {"affect": "negative"} if any(cue in prompt for cue in NEGATIVE_CUES) else {},
-    }
+    """Compatibility helper for callers that can consume only one proposal."""
+    proposals = proposals_from_prompt(prompt)
+    return proposals[0] if proposals else None
 
 
 def render_recall_context(package: dict[str, Any]) -> str:
@@ -104,13 +157,14 @@ def handle_user_prompt_submit(
         }
     )
     context = render_recall_context(package)
-    proposal = proposal_from_prompt(prompt)
-    if resolved.allow_plaintext_candidates and proposal:
-        stable = hashlib.sha256(
-            f"{resolved.user_id}\0{conversation_id}\0{turn_id}".encode()
-        ).hexdigest()[:24]
-        proposal["candidate_id"] = f"candidate-codex-{stable}"
-        runtime.observe(
+    proposals = proposals_from_prompt(prompt)
+    if resolved.allow_plaintext_candidates and proposals:
+        for index, proposal in enumerate(proposals):
+            stable = hashlib.sha256(
+                f"{resolved.user_id}\0{conversation_id}\0{turn_id}\0{index}".encode()
+            ).hexdigest()[:24]
+            proposal["candidate_id"] = f"candidate-codex-{stable}"
+        runtime.observe_many(
             {
                 "user_id": resolved.user_id,
                 "conversation_id": conversation_id,
@@ -120,7 +174,7 @@ def handle_user_prompt_submit(
                 "role": "user",
                 "text": prompt,
             },
-            proposal,
+            proposals,
         )
     elif resolved.allow_plaintext_candidates:
         runtime.repo.ensure_user(resolved.user_id)

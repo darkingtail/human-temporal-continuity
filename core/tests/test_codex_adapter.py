@@ -11,7 +11,11 @@ import jsonschema
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from htc_core.codex_adapter import handle_stop, handle_user_prompt_submit
+from htc_core.codex_adapter import (
+    handle_stop,
+    handle_user_prompt_submit,
+    proposals_from_prompt,
+)
 from htc_core.runtime import RuntimeSettings, open_runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -340,9 +344,60 @@ def test_plain_continue_does_not_create_candidate_but_future_and_remember_do(tmp
     )
 
     candidates = core.repo.candidates(configured.user_id)
-    assert {candidate.kind for candidate in candidates} == {"Intention", "Fact"}
+    assert {candidate.kind for candidate in candidates} == {"Intention", "Meaning"}
     traces = core.repo.db.execute(
         "SELECT reason_codes_json,input_summary FROM decision_traces WHERE subject_type='adapter'"
     ).fetchall()
     assert any("no_temporal_or_continuity_signal" in row[0] for row in traces)
     assert all("继续吧" not in row[1] for row in traces)
+
+
+def test_semantic_proposals_cover_first_milestone_types_in_one_turn():
+    proposals = proposals_from_prompt(
+        "昨天去了示例医院检查。最近有点累。那次经历让我更重视休息。明天再整理结果。"
+    )
+
+    assert [proposal["kind"] for proposal in proposals] == [
+        "Episode",
+        "State",
+        "Meaning",
+        "Intention",
+    ]
+    assert proposals[1]["attributes"] == {"affect": "negative"}
+    assert proposals[3]["time"] == {
+        "relative": "tomorrow",
+        "original_expression": "明天",
+    }
+
+
+def test_semantic_proposals_keep_non_actual_scope_per_clause():
+    proposals = proposals_from_prompt("假设明天再做。其实我最近很累。")
+
+    assert [proposal["speech_act"] for proposal in proposals] == ["hypothetical", "actual"]
+    assert [proposal["kind"] for proposal in proposals] == ["Intention", "State"]
+
+
+def test_hook_persists_multiple_candidates_from_one_turn(tmp_path):
+    configured = settings(tmp_path)
+    core = open_runtime(configured)
+
+    handle_user_prompt_submit(
+        {
+            "session_id": "mixed-session",
+            "turn_id": "mixed-turn",
+            "prompt": "昨天完成了初稿。最近有点累。明天继续修改。",
+        },
+        core=core,
+        settings=configured,
+        observed_at="2030-07-18T23:40:00+08:00",
+    )
+
+    candidates = core.repo.candidates(configured.user_id)
+    assert {candidate.kind for candidate in candidates} == {
+        "Episode",
+        "State",
+        "Intention",
+    }
+    intention = next(candidate for candidate in candidates if candidate.kind == "Intention")
+    assert intention.time["expected_at"] == "2030-07-19"
+    assert len({candidate.observation_id for candidate in candidates}) == 1

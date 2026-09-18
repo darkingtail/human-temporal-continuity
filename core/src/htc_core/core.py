@@ -22,6 +22,20 @@ from .repository import SQLiteRepository
 NON_ACTUAL = {"test", "quoted", "hypothetical", "roleplay", "uncertain"}
 INTENTION_STATES = {"planned", "active", "paused", "completed", "cancelled"}
 TERMINAL_INTENTION_STATES = {"completed", "cancelled"}
+RELATIVE_DAY_OFFSETS = {
+    "today": 0,
+    "tonight": 0,
+    "tomorrow": 1,
+    "day_after_tomorrow": 2,
+}
+RELATIVE_EXPRESSIONS = {
+    "today": "今天",
+    "tonight": "今晚",
+    "tomorrow": "明天",
+    "day_after_tomorrow": "后天",
+    "next_time": "下次",
+    "future": "以后",
+}
 
 
 def parse_dt(value: str) -> datetime:
@@ -33,6 +47,15 @@ class SilentCore:
         self.repo = repository or SQLiteRepository()
 
     def observe(self, request: dict[str, Any], proposal: dict[str, Any]) -> dict[str, Any]:
+        return self.observe_many(request, [proposal])
+
+    def observe_many(
+        self,
+        request: dict[str, Any],
+        proposals: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not proposals:
+            raise ValueError("at_least_one_proposal_required")
         observed_at = request["observed_at"]
         excerpt = request.get("excerpt", request.get("text", ""))[:500]
         observation_id = request.get("observation_id", str(uuid.uuid4()))
@@ -47,7 +70,11 @@ class SilentCore:
             request.get("role", "user"),
             content_hash,
             excerpt,
-            proposal.get("speech_act", "actual"),
+            (
+                proposals[0].get("speech_act", "actual")
+                if len(proposals) == 1
+                else "mixed"
+            ),
         )
         inserted = self.repo.save_observation(observation)
         if not inserted:
@@ -56,60 +83,85 @@ class SilentCore:
                 "candidate_ids": [],
                 "status": "idempotent_replay",
             }
-        candidate_id = proposal.get("candidate_id", str(uuid.uuid4()))
-        speech_act = proposal.get("speech_act", "actual")
-        status = "ignored" if speech_act in NON_ACTUAL else "pending"
-        time = dict(proposal.get("time", {}))
-        if time.get("relative") == "tomorrow":
-            anchor = parse_dt(observed_at)
-            time.update(
-                {
-                    "original_expression": "明天",
-                    "anchor_time": observed_at,
-                    "expected_at": (anchor.date() + timedelta(days=1)).isoformat(),
-                    "timezone": request.get("timezone", "UTC"),
-                    "precision": "day",
-                }
-            )
-        candidate = Candidate(
-            candidate_id,
-            observation_id,
-            request["user_id"],
-            proposal.get("kind", "Episode"),
-            proposal.get("summary", excerpt),
-            speech_act,
-            status,
-            float(proposal.get("confidence", 1.0)),
-            time,
-            proposal.get("sensitivity", "normal"),
-            proposal.get("permissions", {}),
-            proposal.get("attributes", {}),
-        )
+        candidate_ids: list[str] = []
+        statuses: list[str] = []
+        all_reasons: list[str] = []
         with self.repo.tx():
-            self.repo.save_candidate(candidate)
-            reasons = (
-                ("speech_act_not_actual",)
-                if status == "ignored"
-                else (
-                    ("relative_time_anchored",)
-                    if time.get("anchor_time")
-                    else ("candidate_pending_user_decision",)
+            for proposal in proposals:
+                candidate_id = proposal.get("candidate_id", str(uuid.uuid4()))
+                speech_act = proposal.get("speech_act", "actual")
+                status = "ignored" if speech_act in NON_ACTUAL else "pending"
+                time = self._normalize_candidate_time(
+                    dict(proposal.get("time", {})),
+                    observed_at=observed_at,
+                    timezone=request.get("timezone", "UTC"),
                 )
-            )
-            self.repo.trace(
-                "trace-" + candidate_id,
-                "candidate",
-                candidate_id,
-                reasons,
-                excerpt[:200],
-                observed_at,
-            )
+                candidate = Candidate(
+                    candidate_id,
+                    observation_id,
+                    request["user_id"],
+                    proposal.get("kind", "Episode"),
+                    proposal.get("summary", excerpt),
+                    speech_act,
+                    status,
+                    float(proposal.get("confidence", 1.0)),
+                    time,
+                    proposal.get("sensitivity", "normal"),
+                    proposal.get("permissions", {}),
+                    proposal.get("attributes", {}),
+                )
+                self.repo.save_candidate(candidate)
+                reasons = (
+                    ("speech_act_not_actual",)
+                    if status == "ignored"
+                    else (
+                        ("relative_time_anchored",)
+                        if time.get("anchor_time")
+                        else ("candidate_pending_user_decision",)
+                    )
+                )
+                self.repo.trace(
+                    "trace-" + candidate_id,
+                    "candidate",
+                    candidate_id,
+                    reasons,
+                    candidate.summary[:200],
+                    observed_at,
+                )
+                candidate_ids.append(candidate_id)
+                statuses.append(status)
+                all_reasons.extend(reasons)
+        result_status = statuses[0] if len(set(statuses)) == 1 and statuses else "mixed"
         return {
             "observation_id": observation_id,
-            "candidate_ids": [candidate_id],
-            "status": status,
-            "reason_codes": list(reasons),
+            "candidate_ids": candidate_ids,
+            "status": result_status,
+            "reason_codes": list(dict.fromkeys(all_reasons)),
         }
+
+    @staticmethod
+    def _normalize_candidate_time(
+        time: dict[str, Any],
+        *,
+        observed_at: str,
+        timezone: str,
+    ) -> dict[str, Any]:
+        relative = time.get("relative")
+        if relative not in RELATIVE_EXPRESSIONS:
+            return time
+        time.setdefault("original_expression", RELATIVE_EXPRESSIONS[relative])
+        time.setdefault("anchor_time", observed_at)
+        time.setdefault("timezone", timezone)
+        if relative in RELATIVE_DAY_OFFSETS:
+            anchor = parse_dt(observed_at)
+            time.setdefault(
+                "expected_at",
+                (anchor.date() + timedelta(days=RELATIVE_DAY_OFFSETS[relative])).isoformat(),
+            )
+            time.setdefault("precision", "day")
+        else:
+            time.setdefault("precision", "unknown")
+        return time
 
     def decide(
         self,

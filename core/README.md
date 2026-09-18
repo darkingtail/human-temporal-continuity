@@ -33,9 +33,13 @@ uv run htc-core --db .\demo.sqlite3 recall --input .\recall.json
 uv run htc-core --db .\demo.sqlite3 explain --id <trace-id> --user-id <user-id>
 ```
 
-Structured candidate proposals are a fixture boundary, not a claim of general
-natural-language understanding. A future host or LLM extractor may propose the
-same structure, but it will remain unable to write Memory directly.
+Structured candidate proposals remain an untrusted boundary: a host or model may
+propose `Episode`, `State`, `Intention`, `Meaning`, or later `Pattern` objects,
+but it cannot write Memory directly. The Codex adapter includes a deliberately
+conservative local signal extractor for the first four kinds. It can emit several
+Candidates from one mixed user turn, preserves clause-level speech act, and leaves
+every actual proposal pending for user governance rather than treating heuristic
+classification as truth.
 
 ## Midstream adoption and recovery
 
