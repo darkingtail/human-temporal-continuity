@@ -21,7 +21,7 @@ STATE_CUES = ("最近", "现在", "目前", "一直", "仍然", "住在", "在�
 MEANING_CUES = ("让我", "使我", "因此我", "所以我", "我意识到", "我明白", "对我来说")
 INTENTION_CUES = ("打算", "准备", "计划", "再做", "继续做", "继续修改", "继续整理")
 EPISODE_CUES = ("昨天", "前天", "上周", "去年", "去了", "发生", "完成了", "离开了", "回来了")
-CLAUSE_SPLIT = re.compile(r"[。！？!?；;\n]+")
+CLAUSE_SPLIT = re.compile(r"[。！？!?；;，,\n]+")
 
 
 def now_iso(timezone: str) -> str:

@@ -377,6 +377,22 @@ def test_semantic_proposals_keep_non_actual_scope_per_clause():
     assert [proposal["kind"] for proposal in proposals] == ["Intention", "State"]
 
 
+def test_semantic_proposals_split_comma_scoped_clauses():
+    quoted = proposals_from_prompt("她说她明天回来，我现在很累。")
+    hypothetical = proposals_from_prompt("假设明天再做，但我最近很累。")
+    mixed_time = proposals_from_prompt("昨天完成了初稿，明天继续修改。")
+
+    assert [(item["kind"], item["speech_act"]) for item in quoted] == [
+        ("Intention", "quoted"),
+        ("State", "actual"),
+    ]
+    assert [(item["kind"], item["speech_act"]) for item in hypothetical] == [
+        ("Intention", "hypothetical"),
+        ("State", "actual"),
+    ]
+    assert [item["kind"] for item in mixed_time] == ["Episode", "Intention"]
+
+
 def test_hook_persists_multiple_candidates_from_one_turn(tmp_path):
     configured = settings(tmp_path)
     core = open_runtime(configured)

@@ -9,4 +9,4 @@ updated: 2026-09-06
 2. Remove private development artifacts and replace autobiographical examples with synthetic fixtures.
 3. Make committed host configuration portable and remove machine/task identifiers.
 4. Run tests, build, identifier scans, and an independent review.
-5. Replace the remote repository with one sanitized root commit, verify remote refs, then set visibility to public.
+5. Replace the remote `main` history with the sanitized lineage, verify remote refs, and confirm public visibility.

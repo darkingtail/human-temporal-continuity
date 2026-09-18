@@ -20,8 +20,8 @@ State the phase outcome.
 |---|---|---|---|
 | CHORE-001 | Prepare privacy-safe public repository | active |  |
 | CHORE-002 | Sanitize public Git history and metadata | active |  |
-| CHORE-003 | Repair CatPaw board health | active |  |
-| FR-002 | Add governed semantic candidate proposals | active |  |
+| CHORE-003 | Repair CatPaw board health | done |  |
+| FR-002 | Add governed semantic candidate proposals | done |  |
 <!-- catpaw:milestone-scope:end -->
 
 ## Exit Criteria

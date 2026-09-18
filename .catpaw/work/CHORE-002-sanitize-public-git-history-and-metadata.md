@@ -3,7 +3,7 @@ id: CHORE-002
 type: chore
 mode: gated
 status: active
-stage: build
+stage: test
 created: 2026-09-18
 updated: 2026-09-18
 closed: null
@@ -20,8 +20,8 @@ candidate: null
 ## Progress
 
 <!-- catpaw:work-progress:start -->
-- Phase: Execute
-- Next: Rewrite reachable commits with noreply identity, remove internal task id, verify and force-with-lease push.
+- Phase: Check
+- Next: Record independent review, force-with-lease push, and verify remote refs.
 <!-- catpaw:work-progress:end -->
 
 ## Scope

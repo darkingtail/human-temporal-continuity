@@ -157,30 +157,29 @@ class SQLiteRepository:
         )
 
     def save_observation(self, o: Observation) -> bool:
-        with self.tx():
-            self.ensure_conversation(o.user_id, o.conversation_id)
-            existing = self.db.execute(
-                "SELECT content_hash FROM observations WHERE conversation_id=? AND turn_id=?",
-                (o.conversation_id, o.turn_id),
-            ).fetchone()
-            if existing and existing["content_hash"] != o.content_hash:
-                raise ValueError("idempotency_conflict")
-            cur = self.db.execute(
-                """INSERT OR IGNORE INTO observations(id,user_id,conversation_id,turn_id,observed_at,timezone,role,content_hash,excerpt,speech_act) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    o.id,
-                    o.user_id,
-                    o.conversation_id,
-                    o.turn_id,
-                    o.observed_at,
-                    o.timezone,
-                    o.role,
-                    o.content_hash,
-                    o.excerpt,
-                    o.speech_act,
-                ),
-            )
-            return cur.rowcount == 1
+        self.ensure_conversation(o.user_id, o.conversation_id)
+        existing = self.db.execute(
+            "SELECT content_hash FROM observations WHERE conversation_id=? AND turn_id=?",
+            (o.conversation_id, o.turn_id),
+        ).fetchone()
+        if existing and existing["content_hash"] != o.content_hash:
+            raise ValueError("idempotency_conflict")
+        cur = self.db.execute(
+            """INSERT OR IGNORE INTO observations(id,user_id,conversation_id,turn_id,observed_at,timezone,role,content_hash,excerpt,speech_act) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                o.id,
+                o.user_id,
+                o.conversation_id,
+                o.turn_id,
+                o.observed_at,
+                o.timezone,
+                o.role,
+                o.content_hash,
+                o.excerpt,
+                o.speech_act,
+            ),
+        )
+        return cur.rowcount == 1
 
     def save_candidate(self, c: Candidate) -> None:
         self.db.execute(

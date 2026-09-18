@@ -1,6 +1,6 @@
 VERIFICATION
 ===========
-Changed branch/field: public repository content and Git history (main)
+Changed branch/field: main; public history, CatPaw board, and HTC semantic ingestion
 Artifacts:
 - docs/public-sanitization/MODIFIED_FILE.md
 - docs/public-sanitization/DIFF_FILE.md
@@ -8,30 +8,41 @@ Artifacts:
 - docs/public-sanitization/ROLLBACK.sh
 
 BASELINE
-Command: uv run --project core pytest
-Input: preserved pre-sanitization snapshot
-Literal result: 36 tests collected; tests completed, then Windows pytest temp cleanup raised WinError 5
-Exit status: 1 (environment cleanup only; test assertions passed)
+Command: uv run pytest -q tests/test_codex_adapter.py::test_semantic_proposals_split_comma_scoped_clauses tests/test_core.py::test_relative_day_uses_declared_timezone_before_date_arithmetic tests/test_core.py::test_observe_many_rolls_back_observation_when_candidate_insert_fails
+Input: preserved candidate before the three fixes
+Literal result: FFF [100%]; quoted/hypothetical comma scope lost the second clause, tomorrow resolved as 2030-07-19 instead of 2030-07-20, and one observation remained after candidate insertion failed
+Exit status: 1
 
 MODIFIED
-Command: uv run --project core pytest --basetemp .tmp-public-pytest
-Input: sanitized working tree
-Literal result: 36 passed in 10.21s
+Command: uv run pytest tests/test_codex_adapter.py::test_semantic_proposals_split_comma_scoped_clauses tests/test_core.py::test_relative_day_uses_declared_timezone_before_date_arithmetic tests/test_core.py::test_observe_many_rolls_back_observation_when_candidate_insert_fails --tb=short
+Input: changed HTC Core working tree
+Literal result: 3 passed in 1.17s
 Exit status: 0
-Command: uv run --project core ruff check .
+Command: uv run pytest -q
+Input: core
+Literal result: 61 passed
+Exit status: 0
+Command: uv run ruff check src tests
+Input: core
 Literal result: All checks passed!
 Exit status: 0
 Command: pnpm build
-Literal result: built successfully; existing chunk-size warning only
+Input: repository root
+Literal result: 2159 modules transformed; built in 7.72s; existing chunk-size warning only
 Exit status: 0
 Command: git diff --check
+Input: repository working tree
 Literal result: no whitespace errors
+Exit status: 0
+Command: node "$HOME/.catpaw/bin/catpaw.mjs" board doctor
+Input: project .catpaw board
+Literal result: Findings: 0; Next: No action required.
 Exit status: 0
 
 ROLLBACK
-Command: bash docs/public-sanitization/ROLLBACK.sh
-Input: preserved private bundle at the local backup path
-Literal result: rollback path acknowledged; public tree remains sanitized
-Exit status: 0 expected
+Command: bash docs/public-sanitization/ROLLBACK.sh <separate-empty-target>
+Input: HTC_PRIVATE_BACKUP points to the preserved private Git bundle
+Literal result: Rollback clone restored from preserved bundle; source working tree unchanged.
+Exit status: 0
 
-Restored behavior/status: private history remains available only in the local backup; public main contains sanitized content and no legacy refs after push.
+Restored behavior/status: the separate rollback clone opens the preserved private history; this main working tree remains changed and sanitized.

@@ -2,17 +2,17 @@
 id: CHORE-003
 type: chore
 mode: tracked
-status: active
-stage: build
+status: done
+stage: reflect
 created: 2026-09-18
 updated: 2026-09-18
-closed: null
+closed: 2026-09-18
 contract: 4
 acceptance: Repair CatPaw board health
 scope: "."
 owner: primary
 cycle: 1
-candidate: null
+candidate: a9e160308d48d2ce8a529291df19f54898034e6c42b0bddca7257ce2b81ef82c
 ---
 
 # CHORE-003: Repair CatPaw board health
@@ -20,8 +20,8 @@ candidate: null
 ## Progress
 
 <!-- catpaw:work-progress:start -->
-- Phase: Execute
-- Next: Add missing completion evidence and board directories, then run doctor.
+- Phase: Finish
+- Next: Completed
 <!-- catpaw:work-progress:end -->
 
 ## Scope

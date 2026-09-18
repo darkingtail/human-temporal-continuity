@@ -3,9 +3,9 @@ id: CHORE-001
 type: chore
 mode: gated
 status: active
-stage: review
+stage: test
 created: 2026-09-06
-updated: 2026-09-06
+updated: 2026-09-18
 closed: null
 ---
 
@@ -22,20 +22,28 @@ machine-specific identifiers, private task references, or prior commit history.
 - [ ] Common secret and personal-identifier scans pass.
 - [ ] Tests, build, and CatPaw doctor pass.
 - [ ] Independent public-readiness review passes.
-- [ ] Public remote contains one sanitized root commit and no legacy branch or PR history.
+- [ ] Public remote contains only the sanitized `main` history and no legacy branch or PR refs.
 - [ ] Repository visibility is PUBLIC.
 
 ## Links
 
 - Plan: [CHORE-001 Plan](../plans/CHORE-001-prepare-public-repository.md)
 
-## Completion
+## Current state
 
-The original repository was deleted and recreated as a public repository. The
-remote now contains only the sanitized `main` root commit.
+The repository is public. The local `main` candidate has sanitized metadata and
+content, while the remote still awaits the authorized force-with-lease update
+and post-push verification.
 
 ## Follow-up
 
 Global user-level runtime design is documented in
 `docs/global-memory-architecture.md`. The next implementation milestone is a
 Source Registry plus an explicit JSONL historical importer.
+
+## Progress
+
+<!-- catpaw:work-progress:start -->
+- Phase: Check
+- Next: Record current privacy scan and independent public-readiness review.
+<!-- catpaw:work-progress:end -->

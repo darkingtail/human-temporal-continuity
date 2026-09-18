@@ -289,6 +289,80 @@ def test_observe_many_creates_one_observation_with_multiple_candidates():
     assert len(core.repo.memories("user-1")) == 0
 
 
+def test_relative_day_uses_declared_timezone_before_date_arithmetic():
+    core = make_core()
+    result = core.observe(
+        {
+            "user_id": "user-1",
+            "conversation_id": "conversation-timezone",
+            "turn_id": "timezone-midnight",
+            "observed_at": "2030-07-18T16:30:00+00:00",
+            "timezone": "Asia/Shanghai",
+            "role": "user",
+            "text": "明天继续修改",
+        },
+        {
+            "candidate_id": "candidate-timezone-midnight",
+            "kind": "Intention",
+            "summary": "明天继续修改",
+            "speech_act": "actual",
+            "time": {"relative": "tomorrow", "original_expression": "明天"},
+        },
+    )
+
+    assert result["status"] == "pending"
+    candidate = core.repo.candidate("candidate-timezone-midnight")
+    assert candidate.time["expected_at"] == "2030-07-20"
+
+
+def test_observe_many_rolls_back_observation_when_candidate_insert_fails():
+    core = make_core()
+    request = {
+        "user_id": "user-1",
+        "conversation_id": "conversation-atomic",
+        "turn_id": "atomic-turn",
+        "observed_at": "2030-07-18T23:40:00+08:00",
+        "timezone": "Asia/Shanghai",
+        "role": "user",
+        "text": "昨天完成了初稿，明天继续修改",
+    }
+    duplicate_ids = [
+        {
+            "candidate_id": "candidate-duplicate",
+            "kind": "Episode",
+            "summary": "昨天完成了初稿",
+            "speech_act": "actual",
+        },
+        {
+            "candidate_id": "candidate-duplicate",
+            "kind": "Intention",
+            "summary": "明天继续修改",
+            "speech_act": "actual",
+        },
+    ]
+
+    try:
+        core.observe_many(request, duplicate_ids)
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("duplicate candidate ids unexpectedly committed")
+
+    assert core.repo.db.execute("SELECT count(*) FROM observations").fetchone()[0] == 0
+    assert core.repo.db.execute("SELECT count(*) FROM candidates").fetchone()[0] == 0
+
+    retry = core.observe_many(
+        request,
+        [
+            {**duplicate_ids[0], "candidate_id": "candidate-atomic-episode"},
+            {**duplicate_ids[1], "candidate_id": "candidate-atomic-intention"},
+        ],
+    )
+    assert retry["status"] == "pending"
+    assert core.repo.db.execute("SELECT count(*) FROM observations").fetchone()[0] == 1
+    assert core.repo.db.execute("SELECT count(*) FROM candidates").fetchone()[0] == 2
+
+
 def test_sensitive_memory_requires_confirmation_and_never_leaks_summary():
     core = make_core()
     observe(

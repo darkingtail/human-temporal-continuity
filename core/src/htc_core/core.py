@@ -6,6 +6,7 @@ import uuid
 from contextlib import suppress
 from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .models import (
     BootstrapSnapshot,
@@ -76,17 +77,17 @@ class SilentCore:
                 else "mixed"
             ),
         )
-        inserted = self.repo.save_observation(observation)
-        if not inserted:
-            return {
-                "observation_id": observation_id,
-                "candidate_ids": [],
-                "status": "idempotent_replay",
-            }
         candidate_ids: list[str] = []
         statuses: list[str] = []
         all_reasons: list[str] = []
         with self.repo.tx():
+            inserted = self.repo.save_observation(observation)
+            if not inserted:
+                return {
+                    "observation_id": observation_id,
+                    "candidate_ids": [],
+                    "status": "idempotent_replay",
+                }
             for proposal in proposals:
                 candidate_id = proposal.get("candidate_id", str(uuid.uuid4()))
                 speech_act = proposal.get("speech_act", "actual")
@@ -153,7 +154,7 @@ class SilentCore:
         time.setdefault("anchor_time", observed_at)
         time.setdefault("timezone", timezone)
         if relative in RELATIVE_DAY_OFFSETS:
-            anchor = parse_dt(observed_at)
+            anchor = parse_dt(observed_at).astimezone(ZoneInfo(timezone))
             time.setdefault(
                 "expected_at",
                 (anchor.date() + timedelta(days=RELATIVE_DAY_OFFSETS[relative])).isoformat(),
