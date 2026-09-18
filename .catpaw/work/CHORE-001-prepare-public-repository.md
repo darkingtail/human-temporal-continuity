@@ -2,11 +2,11 @@
 id: CHORE-001
 type: chore
 mode: gated
-status: active
-stage: test
+status: done
+stage: reflect
 created: 2026-09-06
 updated: 2026-09-18
-closed: null
+closed: 2026-09-18
 ---
 
 # CHORE-001: Prepare privacy-safe public repository
@@ -14,16 +14,16 @@ closed: null
 ## Goal
 
 Publish a reusable HTC codebase without private autobiographical material,
-machine-specific identifiers, private task references, or prior commit history.
+machine-specific identifiers, private task references, or prior private commit history.
 
 ## Acceptance
 
-- [ ] Current tree contains only synthetic examples and portable configuration.
-- [ ] Common secret and personal-identifier scans pass.
-- [ ] Tests, build, and CatPaw doctor pass.
-- [ ] Independent public-readiness review passes.
-- [ ] Public remote contains only the sanitized `main` history and no legacy branch or PR refs.
-- [ ] Repository visibility is PUBLIC.
+- [x] Current tree contains only synthetic examples and portable configuration.
+- [x] Common secret and personal-identifier scans pass.
+- [x] Tests, build, and CatPaw doctor pass.
+- [x] Independent public-readiness review passes.
+- [x] Public remote contains only the sanitized `main` history and no legacy branch or PR refs.
+- [x] Repository visibility is PUBLIC.
 
 ## Links
 
@@ -31,9 +31,9 @@ machine-specific identifiers, private task references, or prior commit history.
 
 ## Current state
 
-The repository is public. The local `main` candidate has sanitized metadata and
-content, while the remote still awaits the authorized force-with-lease update
-and post-push verification.
+The repository is public. The remote `main` now matches the sanitized local
+lineage, exposes no other branch, tag, or pull-request refs, and passed the
+post-push privacy and secret-scanning checks.
 
 ## Follow-up
 
@@ -44,6 +44,6 @@ Source Registry plus an explicit JSONL historical importer.
 ## Progress
 
 <!-- catpaw:work-progress:start -->
-- Phase: Check
-- Next: Record current privacy scan and independent public-readiness review.
+- Phase: Finish
+- Next: Completed
 <!-- catpaw:work-progress:end -->

@@ -2,17 +2,17 @@
 id: CHORE-002
 type: chore
 mode: gated
-status: active
-stage: test
+status: done
+stage: reflect
 created: 2026-09-18
 updated: 2026-09-18
-closed: null
+closed: 2026-09-18
 contract: 4
 acceptance: Sanitize public Git history and metadata
 scope: "."
 owner: primary
 cycle: 1
-candidate: null
+candidate: e8c494708f529ff7459fff57de0e3211362ad8e8e9585f15e3a4f8b3eddd1708
 ---
 
 # CHORE-002: Sanitize public Git history and metadata
@@ -20,8 +20,8 @@ candidate: null
 ## Progress
 
 <!-- catpaw:work-progress:start -->
-- Phase: Check
-- Next: Record independent review, force-with-lease push, and verify remote refs.
+- Phase: Finish
+- Next: Completed
 <!-- catpaw:work-progress:end -->
 
 ## Scope
