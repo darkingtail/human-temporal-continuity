@@ -16,10 +16,12 @@ dependencies = [
 ]
 
 [project.scripts]
+htc = "htc_core.cli:main"
 htc-core = "htc_core.cli:main"
 htc-codex-hook = "htc_core.codex_adapter:main"
 htc-mcp = "htc_core.mcp_server:main"
-htc-workbench-api = "htc_core.http_api:main"
+htc-workbench-api = "htc_core.daemon:main"
+htcd = "htc_core.daemon:main"
 
 [dependency-groups]
 dev = [

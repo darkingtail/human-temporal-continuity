@@ -176,6 +176,8 @@ class SilentCore:
         merge_into_memory_id: str | None = None,
         merge_expected_revision: int | None = None,
     ) -> dict[str, Any]:
+        if decision not in {"accept", "reject"}:
+            raise ValueError("invalid_decision")
         candidate = self.repo.candidate(candidate_id)
         if candidate.status != "pending":
             return {
@@ -185,7 +187,16 @@ class SilentCore:
             }
         if decision != "accept":
             with self.repo.tx():
-                self.repo.set_candidate_status(candidate_id, "rejected")
+                if not self.repo.set_candidate_status(
+                    candidate_id,
+                    "rejected",
+                    expected_status="pending",
+                ):
+                    return {
+                        "candidate_id": candidate_id,
+                        "status": "not_decidable",
+                        "reason_codes": ["candidate_not_pending"],
+                    }
                 self.repo.trace(
                     "trace-decision-" + candidate_id,
                     "decision",
@@ -231,6 +242,16 @@ class SilentCore:
             if not self.repo.memory_is_current(existing.id):
                 raise ValueError("memory_not_current")
             with self.repo.tx():
+                if not self.repo.set_candidate_status(
+                    candidate_id,
+                    "accepted",
+                    expected_status="pending",
+                ):
+                    return {
+                        "candidate_id": candidate_id,
+                        "status": "not_decidable",
+                        "reason_codes": ["candidate_not_pending"],
+                    }
                 merged = self.repo.revise_memory(
                     existing.id,
                     expected_revision=(
@@ -266,7 +287,6 @@ class SilentCore:
                         ),
                     )
                     merged = self.repo.memory(merged.id)
-                self.repo.set_candidate_status(candidate_id, "accepted")
                 self.repo.bump_user(candidate.user_id, revoke=True)
                 self.repo.trace(
                     "trace-decision-" + candidate_id,
@@ -328,7 +348,16 @@ class SilentCore:
             (candidate.observation_id,),
         )
         with self.repo.tx():
-            self.repo.set_candidate_status(candidate_id, "accepted")
+            if not self.repo.set_candidate_status(
+                candidate_id,
+                "accepted",
+                expected_status="pending",
+            ):
+                return {
+                    "candidate_id": candidate_id,
+                    "status": "not_decidable",
+                    "reason_codes": ["candidate_not_pending"],
+                }
             self.repo.save_memory(m, m.source_ids, "accepted", now)
             self.repo.bump_user(candidate.user_id)
             self.repo.trace(
@@ -898,6 +927,15 @@ class SilentCore:
                 ),
                 now,
             )
+        result = self.package_payload(p)
+        if package_reason_codes:
+            result["reason_codes"] = list(dict.fromkeys(package_reason_codes))
+        return result
+
+    @staticmethod
+    def package_payload(p: RecallPackage) -> dict[str, Any]:
+        """Project a package without issuing it again or consuming recall usage."""
+        items = p.items
         adapter_payload = {
             "allowed_memories": [
                 {"memory_id": i.memory_id, "summary": i.summary}
@@ -920,8 +958,8 @@ class SilentCore:
                 }
             ),
         }
-        result = {
-            "package_id": package_id,
+        return {
+            "package_id": p.id,
             "purpose": p.purpose,
             "issued_at": p.issued_at,
             "expires_at": p.expires_at,
@@ -940,10 +978,6 @@ class SilentCore:
             ],
             "adapter_payload": adapter_payload,
         }
-        if package_reason_codes:
-            result["reason_codes"] = list(dict.fromkeys(package_reason_codes))
-        return result
-
     def validate_package(
         self,
         package_id: str,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -43,19 +44,27 @@ CREATE TABLE IF NOT EXISTS import_records (job_id TEXT NOT NULL REFERENCES impor
 CREATE TABLE IF NOT EXISTS bootstrap_snapshots (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), mode TEXT NOT NULL, source_ids_json TEXT NOT NULL, job_ids_json TEXT NOT NULL, candidate_ids_json TEXT NOT NULL, established_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS adapter_events (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), conversation_id TEXT NOT NULL, turn_id TEXT NOT NULL, event_type TEXT NOT NULL, occurred_at TEXT NOT NULL, payload_json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS states (user_id TEXT PRIMARY KEY REFERENCES users(id), label TEXT NOT NULL, tone TEXT NOT NULL, since TEXT NOT NULL, status TEXT NOT NULL, source_memory_ids_json TEXT NOT NULL DEFAULT '[]', revision INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rpc_receipts (idempotency_key TEXT PRIMARY KEY, operation TEXT NOT NULL, request_hash TEXT NOT NULL, response_json TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
 
 class SQLiteRepository:
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(
+            self.path,
+            isolation_level=None,
+            check_same_thread=False,
+        )
         self.db.row_factory = sqlite3.Row
+        self._tx_state = threading.local()
+        self._tx_lock = threading.RLock()
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.executescript(SCHEMA)
-        self._migrate()
-        self.db.commit()
+        with self.tx():
+            self._migrate()
 
     def _migrate(self) -> None:
         """Apply additive migrations for databases created by earlier slices."""
@@ -116,15 +125,77 @@ class SQLiteRepository:
             )
         if version < 6:
             self.db.execute("PRAGMA user_version=6")
+        self.db.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version,applied_at) VALUES (?,datetime('now'))",
+            (6,),
+        )
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
+        depth = getattr(self._tx_state, "depth", 0)
+        outermost = depth == 0
+        if outermost:
+            self._tx_lock.acquire()
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+            except Exception:
+                self._tx_lock.release()
+                raise
+        self._tx_state.depth = depth + 1
         try:
             yield self.db
-            self.db.commit()
         except Exception:
-            self.db.rollback()
+            self._tx_state.depth = depth
+            if outermost:
+                try:
+                    self.db.execute("ROLLBACK")
+                finally:
+                    self._tx_lock.release()
             raise
+        else:
+            self._tx_state.depth = depth
+            if outermost:
+                try:
+                    self.db.execute("COMMIT")
+                except Exception:
+                    self.db.execute("ROLLBACK")
+                    raise
+                finally:
+                    self._tx_lock.release()
+
+    def rpc_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT operation,request_hash,response_json,created_at FROM rpc_receipts "
+            "WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "operation": row["operation"],
+            "request_hash": row["request_hash"],
+            "response": load(row["response_json"], {}),
+            "created_at": row["created_at"],
+        }
+
+    def save_rpc_receipt(
+        self,
+        *,
+        idempotency_key: str,
+        operation: str,
+        request_hash: str,
+        response: dict[str, Any],
+        created_at: str,
+    ) -> None:
+        self.db.execute(
+            "INSERT INTO rpc_receipts(idempotency_key,operation,request_hash,response_json,created_at) "
+            "VALUES (?,?,?,?,?)",
+            (idempotency_key, operation, request_hash, dump(response), created_at),
+        )
+
+    def prune_rpc_receipts(self, before: str) -> int:
+        cursor = self.db.execute("DELETE FROM rpc_receipts WHERE created_at<?", (before,))
+        return cursor.rowcount
 
     def ensure_user(self, user_id: str) -> None:
         self.db.execute("INSERT OR IGNORE INTO users(id,cross_session_consent) VALUES (?,1)", (user_id,))
@@ -219,8 +290,21 @@ class SQLiteRepository:
             load(r["attributes_json"], {}),
         )
 
-    def set_candidate_status(self, cid: str, status: str) -> None:
-        self.db.execute("UPDATE candidates SET status=? WHERE id=?", (status, cid))
+    def set_candidate_status(
+        self,
+        cid: str,
+        status: str,
+        *,
+        expected_status: str | None = None,
+    ) -> bool:
+        if expected_status is None:
+            cursor = self.db.execute("UPDATE candidates SET status=? WHERE id=?", (status, cid))
+        else:
+            cursor = self.db.execute(
+                "UPDATE candidates SET status=? WHERE id=? AND status=?",
+                (status, cid, expected_status),
+            )
+        return cursor.rowcount == 1
 
     def candidates(self, user_id: str, *, status: str | None = None, limit: int = 50) -> list[Candidate]:
         query = "SELECT id FROM candidates WHERE user_id=?"
@@ -641,6 +725,24 @@ class SQLiteRepository:
             "INSERT OR IGNORE INTO adapter_events VALUES (?,?,?,?,?,?,?)",
             (event_id, user_id, conversation_id, turn_id, event_type, occurred_at, dump(payload)),
         )
+        if cursor.rowcount == 0 and "recall_package_id" in payload:
+            previous = self.db.execute(
+                "SELECT * FROM adapter_events WHERE id=?", (event_id,),
+            ).fetchone()
+            previous_payload = load(previous["payload_json"], {})
+            if (
+                previous["user_id"] != user_id
+                or previous["conversation_id"] != conversation_id
+                or previous["turn_id"] != turn_id
+                or previous["event_type"] != event_type
+                or previous_payload.get("prompt_sha256") != payload.get("prompt_sha256")
+            ):
+                raise ValueError("adapter_event_content_conflict")
+            # Upgrade offline metadata or refresh an expired receipt's reference,
+            # without adding an event or changing the original occurrence time.
+            self.db.execute(
+                "UPDATE adapter_events SET payload_json=? WHERE id=?", (dump(payload), event_id),
+            )
         return cursor.rowcount == 1
 
     def adapter_events(self, user_id: str) -> list[dict[str, Any]]:

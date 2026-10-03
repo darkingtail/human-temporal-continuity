@@ -45,6 +45,8 @@ Skill、Agent 插件、MCP Server、存储引擎和调度器都可以承载或�
 - [Memory Workbench MVP](docs/memory-workbench-mvp.md)
 - [Bootstrap 与记忆恢复](docs/bootstrap-memory-recovery.md)
 - [Codex Adapter MVP](docs/codex-adapter-mvp.md)
+- [HTC Global Runtime Architecture](docs/global-memory-architecture.md)
+- [Implementation Status](docs/status.md)
 - [2026 行业扫描与旧分析对照](docs/industry-scan-gstack-2026-07-17.md)
 - [竞品与既有方案分析](docs/competitive-analysis.md)
 

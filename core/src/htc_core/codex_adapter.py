@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
+import os
 import re
 import sys
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .client import DaemonUnavailable, HtcClient, RpcError
 from .core import SilentCore
-from .runtime import RuntimeSettings, open_runtime, settings_from_env
+from .runtime import RuntimeSettings, settings_from_env
 
 MAX_PROMPT_CHARS = 10_000
 MAX_CONTEXT_CHARS = 1_500
@@ -127,6 +130,33 @@ def render_recall_context(package: dict[str, Any]) -> str:
     return "\n".join(lines)[:MAX_CONTEXT_CHARS]
 
 
+def _maybe_start_runtime(settings: RuntimeSettings) -> None:
+    if os.environ.get("HTC_AUTO_START") != "1":
+        return
+    from .launcher import ensure_runtime
+
+    ensure_runtime(settings)
+
+
+def _read_hook_input() -> str:
+    stream = sys.stdin.buffer if hasattr(sys.stdin, "buffer") else sys.stdin
+    raw = stream.read()
+    if isinstance(raw, str):
+        return raw
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as utf8_error:
+        encodings = [locale.getpreferredencoding(False)]
+        if os.name == "nt":
+            encodings.extend(("mbcs", "gb18030"))
+        for encoding in dict.fromkeys(encodings):
+            try:
+                return raw.decode(encoding)
+            except (LookupError, UnicodeDecodeError):
+                continue
+        raise utf8_error
+
+
 def handle_user_prompt_submit(
     event: dict[str, Any],
     *,
@@ -135,13 +165,57 @@ def handle_user_prompt_submit(
     observed_at: str | None = None,
 ) -> dict[str, Any]:
     resolved = settings or settings_from_env()
-    runtime = core or open_runtime(resolved)
+    current = observed_at or now_iso(resolved.timezone)
+    if core is None:
+        _maybe_start_runtime(resolved)
+        client = HtcClient(resolved)
+        prompt = _required_text(event, "prompt", limit=MAX_PROMPT_CHARS)
+        event = {**event, "prompt": prompt}
+        operation = "codex.user_prompt_submit"
+        payload = {"event": event, "observed_at": current}
+        key = client.codex_event_idempotency_key(
+            operation,
+            event,
+            role="user",
+            content=prompt,
+        )
+        try:
+            return client.call(operation, payload, idempotency_key=key) or {}
+        except (DaemonUnavailable, RpcError) as error:
+            if isinstance(error, RpcError) and not error.retryable:
+                raise
+            if resolved.allow_plaintext_candidates:
+                client.spool_envelope(operation, payload, idempotency_key=key)
+            else:
+                content_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+                redacted_operation = "codex.user_prompt_hash"
+                redacted_payload = {
+                    "event": {
+                        "session_id": event.get("session_id"),
+                        "turn_id": event.get("turn_id"),
+                    },
+                    "content_hash": content_hash,
+                    "content_chars": len(prompt),
+                    "occurred_at": current,
+                }
+                redacted_key = client.codex_event_idempotency_key(
+                    redacted_operation,
+                    redacted_payload["event"],
+                    role="user",
+                    content_hash=content_hash,
+                )
+                client.spool_envelope(
+                    redacted_operation,
+                    redacted_payload,
+                    idempotency_key=redacted_key,
+                )
+            return {}
+    runtime = core
     if event.get("hook_event_name") not in {None, "UserPromptSubmit"}:
         raise ValueError("unexpected_hook_event_name")
     conversation_id = _required_text(event, "session_id")
     turn_id = _required_text(event, "turn_id")
     prompt = _required_text(event, "prompt", limit=MAX_PROMPT_CHARS)
-    current = observed_at or now_iso(resolved.timezone)
     turn_index = event.get("turn_index")
     if isinstance(turn_index, bool) or not isinstance(turn_index, int) or turn_index < 0:
         turn_index = None
@@ -224,7 +298,39 @@ def handle_stop(
     occurred_at: str | None = None,
 ) -> dict[str, Any]:
     resolved = settings or settings_from_env()
-    runtime = core or open_runtime(resolved)
+    current = occurred_at or now_iso(resolved.timezone)
+    if core is None:
+        _maybe_start_runtime(resolved)
+        client = HtcClient(resolved)
+        message = event.get("last_assistant_message") or ""
+        if not isinstance(message, str):
+            raise ValueError("invalid_last_assistant_message")
+        content_hash = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        operation = "codex.stop_hash"
+        redacted_event = {
+            "session_id": event.get("session_id"),
+            "turn_id": event.get("turn_id"),
+        }
+        payload = {
+            "event": redacted_event,
+            "content_hash": content_hash,
+            "content_chars": len(message),
+            "occurred_at": current,
+        }
+        key = client.codex_event_idempotency_key(
+            operation,
+            redacted_event,
+            role="assistant",
+            content_hash=content_hash,
+        )
+        try:
+            return client.call(operation, payload, idempotency_key=key) or {}
+        except (DaemonUnavailable, RpcError) as error:
+            if isinstance(error, RpcError) and not error.retryable:
+                raise
+            client.spool_envelope(operation, payload, idempotency_key=key)
+            return {}
+    runtime = core
     if event.get("hook_event_name") not in {None, "Stop"}:
         raise ValueError("unexpected_hook_event_name")
     conversation_id = _required_text(event, "session_id")
@@ -232,7 +338,6 @@ def handle_stop(
     message = event.get("last_assistant_message") or ""
     if not isinstance(message, str):
         raise ValueError("invalid_last_assistant_message")
-    current = occurred_at or now_iso(resolved.timezone)
     with runtime.repo.tx():
         runtime.repo.record_adapter_event(
             event_id=f"codex-stop-{conversation_id}-{turn_id}",
@@ -256,12 +361,14 @@ def main(argv: list[str] | None = None) -> int:
         # Codex sends hook events as UTF-8 JSON. Windows hook subprocesses can
         # otherwise inherit a legacy console code page, which makes Chinese
         # prompts or assistant messages fail before HTC can process them.
-        raw_input = (
-            sys.stdin.buffer.read().decode("utf-8")
-            if hasattr(sys.stdin, "buffer")
-            else sys.stdin.read()
-        )
+        raw_input = _read_hook_input()
         event = json.loads(raw_input)
+        if not command:
+            hook_event_name = event.get("hook_event_name")
+            if hook_event_name == "UserPromptSubmit" or "prompt" in event:
+                command = "user-prompt-submit"
+            elif hook_event_name == "Stop" or "last_assistant_message" in event:
+                command = "stop"
         if command == "user-prompt-submit":
             result = handle_user_prompt_submit(event)
         elif command == "stop":

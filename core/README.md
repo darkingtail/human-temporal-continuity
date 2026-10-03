@@ -7,9 +7,9 @@ Continuity:
 observe -> candidate -> decide -> memory -> recall -> explain
 ```
 
-It is a Python 3.12 library backed by SQLite, plus a small JSON CLI for local
-testing and governance. It deliberately has no HTTP server, LLM dependency,
-vector database, or integration with private host caches.
+It is a Python 3.12 library backed by SQLite, a daemon with a loopback HTTP API,
+and a small JSON CLI for isolated local testing and governance. There is no LLM
+dependency, vector database, or integration with private host caches.
 
 The FR-007 database stores minimized observation evidence rather than raw chat
 history. It is still plaintext SQLite and is only approved for synthetic test
@@ -24,7 +24,9 @@ uv run pytest
 uv run ruff check src tests
 ```
 
-The CLI accepts one JSON object from a file or standard input:
+The development CLI accepts one JSON object from a file or standard input.
+Use a separate synthetic database; do not point this embedded development CLI
+at a live daemon's canonical database:
 
 ```powershell
 uv run htc-core --db .\demo.sqlite3 observe --input .\observation.json
@@ -61,20 +63,37 @@ product model, boundaries, and JSON CLI flow.
 
 ## Codex Adapter MVP
 
-The package also installs two executable entrypoints:
+The package installs these runtime entrypoints:
 
 ```powershell
 uv run htc-codex-hook user-prompt-submit
 uv run htc-codex-hook stop
 uv run htc-mcp
+uv run htcd
 uv run htc-workbench-api
 ```
 
 The Hook commands read one Codex Hook JSON object from stdin. The MCP command
-runs an STDIO server. They share `~/.htc/htc.sqlite3` by default and accept
-`HTC_DB`, `HTC_USER_ID`, and `HTC_TIMEZONE` overrides.
+runs an STDIO server. Both are thin HTTP clients and never open SQLite.
+`htcd` owns the database; `htc-workbench-api` starts the same daemon, not a
+second writer.
+
+`HTC_RUNTIME_DIR` selects discovery and spool storage (default `~/.htc`).
+The daemon publishes `runtime.json` with its loopback address and RPC token.
+`HTC_DB` selects the daemon database (default `~/.htc/htc.sqlite3`).
+`HTC_USER_ID` and `HTC_TIMEZONE` configure the runtime identity and timezone.
 Plaintext Candidate capture is off by default and requires the explicit
 `HTC_ALLOW_PLAINTEXT_CANDIDATES=1` experimental override.
+
+Offline Hooks queue hash-only event metadata by default. With explicit plaintext
+capture enabled, prompt events may be queued for Candidate extraction. Stop
+events remain hash-only. Replay recovers interrupted claims, retries transient
+failures, and moves invalid records to `spool/failed` for inspection. Successful
+RPC retries reuse their receipt; context responses are reconstructed by package
+reference only while the package is still valid and not revoked.
+
+M0 is tested with synthetic data. It does not install a user service, activate
+global Hooks, or migrate a personal database.
 
 See [Codex Adapter MVP](../docs/codex-adapter-mvp.md) for project configuration,
 tool inventory, the cross-conversation validation scenario, and limitations.
@@ -97,6 +116,10 @@ private database. Vite proxies `/api` to that loopback process; a separately
 hosted frontend can set `VITE_HTC_API_BASE`. Read routes include `/api/status`,
 `/api/memories`, `/api/candidates`, `/api/conversations`, conversation detail,
 and memory detail/explanation routes.
+Only `/rpc` requires the runtime token. Existing `/api/*` Workbench routes
+retain their local Host/Origin checks and are not protected by that token.
+Do not expose this development control plane to untrusted local applications
+or other network interfaces; production access-control hardening is not M0.
 Memory responses include a minimized source projection (conversation id,
 observed time, role, and stored excerpt), not raw host history. Governance routes
 use `SilentCore` for candidate decisions, corrections, suppression, retraction,

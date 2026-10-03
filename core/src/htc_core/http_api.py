@@ -1,16 +1,19 @@
 """Small local HTTP surface for the Memory Workbench.
 
 The API is intentionally thin: all state transitions still go through
-``SilentCore`` and the process opens the same SQLite database as the adapters.
-It is a local control plane, not a network service or an authentication layer.
+``SilentCore`` on the daemon-owned SQLite connection. Host adapters use the
+authenticated RPC endpoint; Workbench retains its local control-plane routes.
 """
 
 from __future__ import annotations
 
+import hmac
+import ipaddress
 import json
 import re
+import threading
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -427,7 +430,14 @@ class WorkbenchService:
 
 class WorkbenchRequestHandler(BaseHTTPRequestHandler):
     service: WorkbenchService
+    dispatcher: Any
+    auth_token: str | None = None
+    operation_lock = threading.RLock()
     server_version = "HTCWorkbench/0.1"
+
+    def setup(self) -> None:
+        super().setup()
+        self.connection.settimeout(5)
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return
@@ -462,12 +472,23 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             raise ApiError(400, "json_object_required")
         return value
 
+    def _validate_local_request(self) -> None:
+        host = self.headers.get("Host", "")
+        if not re.fullmatch(r"(?:127\.0\.0\.1|localhost|\[::1\]):\d+", host):
+            raise ApiError(403, "invalid_host")
+        origin = self.headers.get("Origin", "")
+        if origin and not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):\d+", origin):
+            raise ApiError(403, "invalid_origin")
+
     def do_OPTIONS(self) -> None:
         self._send(204, {})
 
     def do_GET(self) -> None:
         try:
-            self._send(200, {"data": self._route_get()})
+            self._validate_local_request()
+            with self.operation_lock:
+                result = self._route_get()
+            self._send(200, {"data": result})
         except ApiError as exc:
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}})
         except Exception:
@@ -475,7 +496,22 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
-            self._send(200, {"data": self._route_post(self._read_body())})
+            self._validate_local_request()
+            body = self._read_body()
+            if urlparse(self.path).path == "/rpc":
+                if not self.auth_token:
+                    raise ApiError(503, "rpc_not_configured")
+                expected = f"Bearer {self.auth_token}"
+                supplied = self.headers.get("Authorization", "")
+                if not hmac.compare_digest(supplied, expected):
+                    raise ApiError(401, "invalid_runtime_token")
+                with self.operation_lock:
+                    result = self.dispatcher.dispatch(body)
+                self._send(200, result)
+                return
+            with self.operation_lock:
+                result = self._route_post(body)
+            self._send(200, {"data": result})
         except ApiError as exc:
             self._send(exc.status, {"error": {"code": exc.code, "message": exc.message}})
         except Exception:
@@ -541,32 +577,55 @@ def create_server(
     *,
     host: str = "127.0.0.1",
     port: int = 8765,
+    dispatcher: Any | None = None,
+    auth_token: str | None = None,
 ) -> HTTPServer:
+    try:
+        is_loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError as exc:
+        raise ValueError("daemon_host_must_be_loopback") from exc
+    if not is_loopback:
+        raise ValueError("daemon_host_must_be_loopback")
     resolved = settings or settings_from_env()
-    service = WorkbenchService(open_runtime(resolved), resolved)
+    core = open_runtime(resolved)
+    service = WorkbenchService(core, resolved)
+    if dispatcher is None:
+        from .rpc import RpcDispatcher
+
+        dispatcher = RpcDispatcher(core, resolved)
 
     class Handler(WorkbenchRequestHandler):
         pass
 
     Handler.service = service
-    # SQLiteRepository owns one connection. A single-threaded local server
-    # keeps requests on the creating thread and makes transaction boundaries
-    # deterministic without weakening SQLite's thread check.
-    return HTTPServer((host, port), Handler)
+    Handler.dispatcher = dispatcher
+    Handler.auth_token = auth_token
+    Handler.operation_lock = threading.RLock()
+    # Request threads are admitted concurrently so short-lived host hooks do not
+    # time out behind socket accept. The handler lock serializes every Core and
+    # Workbench operation over the daemon's single SQLite connection.
+    class RuntimeHTTPServer(ThreadingHTTPServer):
+        request_queue_size = 128
+        daemon_threads = False
+
+        def server_close(self) -> None:
+            try:
+                super().server_close()
+            finally:
+                with Handler.operation_lock:
+                    core.repo.db.close()
+
+    try:
+        return RuntimeHTTPServer((host, port), Handler)
+    except Exception:
+        core.repo.db.close()
+        raise
 
 
 def main() -> None:
-    server = create_server()
-    print(
-        f"HTC Workbench API listening on http://{server.server_address[0]}:{server.server_address[1]}",
-        flush=True,
-    )
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    from .daemon import main as daemon_main
+
+    daemon_main()
 
 
 if __name__ == "__main__":

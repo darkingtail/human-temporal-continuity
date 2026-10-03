@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 import tomllib
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from htc_core.codex_adapter import (
     handle_user_prompt_submit,
     proposals_from_prompt,
 )
+from htc_core.daemon import create_daemon_server
 from htc_core.runtime import RuntimeSettings, open_runtime
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -126,6 +128,7 @@ def test_hook_command_reads_stdin_and_emits_valid_json(tmp_path):
         "HTC_DB": str(tmp_path / "command.sqlite3"),
         "HTC_USER_ID": "command-user",
         "HTC_TIMEZONE": "Asia/Shanghai",
+        "HTC_RUNTIME_DIR": str(tmp_path / "runtime"),
         "HTC_ALLOW_PLAINTEXT_CANDIDATES": "1",
     }
     completed = subprocess.run(
@@ -179,48 +182,63 @@ def test_hook_command_is_unicode_safe_under_legacy_windows_stdout(tmp_path):
         },
     )
     core.decide(observed["candidate_ids"][0], "accept", "2030-07-18T20:02:00+08:00")
+    core.repo.db.close()
+    server = create_daemon_server(configured, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     environment = {
         **os.environ,
         "HTC_DB": str(configured.database_path),
         "HTC_USER_ID": configured.user_id,
         "HTC_TIMEZONE": configured.timezone,
+        "HTC_RUNTIME_DIR": str(configured.resolved_runtime_dir),
         "PYTHONIOENCODING": "cp1252",
     }
-    completed = subprocess.run(
-        [
-            "uv",
-            "run",
-            "--no-sync",
-            "--project",
-            str(CORE_ROOT),
-            "python",
-            "-m",
-            "htc_core.codex_adapter",
-            "user-prompt-submit",
-        ],
-        input=json.dumps(
-            {
-                "session_id": "unicode-target",
-                "turn_id": "unicode-target-turn",
-                "prompt": "你还记得示例导师吗？",
-            },
-            ensure_ascii=False,
-        ).encode("utf-8"),
-        capture_output=True,
-        env=environment,
-        cwd=REPOSITORY_ROOT,
-        check=True,
-    )
+    try:
+        completed = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--no-sync",
+                "--project",
+                str(CORE_ROOT),
+                "python",
+                "-m",
+                "htc_core.codex_adapter",
+                "user-prompt-submit",
+            ],
+            input=json.dumps(
+                {
+                    "session_id": "unicode-target",
+                    "turn_id": "unicode-target-turn",
+                    "prompt": "你还记得示例导师吗？",
+                },
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            capture_output=True,
+            env=environment,
+            cwd=REPOSITORY_ROOT,
+            check=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
     result = json.loads(completed.stdout.decode("ascii"))
     assert "示例导师" in result["hookSpecificOutput"]["additionalContext"]
 
 
 async def _mcp_smoke(tmp_path):
+    configured = RuntimeSettings(tmp_path / "mcp.sqlite3", "mcp-user", "Asia/Shanghai")
+    server = create_daemon_server(configured, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     environment = {
         **os.environ,
-        "HTC_DB": str(tmp_path / "mcp.sqlite3"),
-        "HTC_USER_ID": "mcp-user",
-        "HTC_TIMEZONE": "Asia/Shanghai",
+        "HTC_DB": str(tmp_path / "forbidden-client-db" / "client.sqlite3"),
+        "HTC_USER_ID": configured.user_id,
+        "HTC_TIMEZONE": configured.timezone,
+        "HTC_RUNTIME_DIR": str(configured.resolved_runtime_dir),
     }
     params = StdioServerParameters(
         command="uv",
@@ -236,24 +254,38 @@ async def _mcp_smoke(tmp_path):
         env=environment,
         cwd=REPOSITORY_ROOT / "docs",
     )
-    async with (
-        stdio_client(params) as (read, write),
-        ClientSession(read, write) as session,
-    ):
-        await session.initialize()
-        tools = await session.list_tools()
-        names = {tool.name for tool in tools.tools}
-        assert {
-            "htc_list_candidates",
-            "htc_recall",
-            "htc_status",
-        } <= names
-        assert names == {"htc_list_candidates", "htc_recall", "htc_status"}
-        result = await session.call_tool(
-            "htc_list_candidates", {"status": "pending", "limit": 10}
-        )
-        assert not result.is_error
-        assert result.structured_content == {"candidates": []}
+    try:
+        async with (
+            stdio_client(params) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            assert {
+                "htc_list_candidates",
+                "htc_recall",
+                "htc_status",
+            } <= names
+            assert names == {"htc_list_candidates", "htc_recall", "htc_status"}
+            result = await session.call_tool(
+                "htc_list_candidates", {"status": "pending", "limit": 10}
+            )
+            assert not result.is_error
+            assert result.structured_content == {"candidates": []}
+            status = await session.call_tool("htc_status", {})
+            assert not status.is_error
+            assert status.structured_content["daemon_pid"] == os.getpid()
+            recall = await session.call_tool(
+                "htc_recall", {"conversation_id": "mcp-smoke", "query": "synthetic query"},
+            )
+            assert not recall.is_error
+            assert "adapter_payload" in recall.structured_content
+            assert not Path(environment["HTC_DB"]).exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_mcp_stdio_initialize_list_and_call(tmp_path):
